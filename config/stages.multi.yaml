@@ -1,6 +1,9 @@
 conference:
   name: Nerdearla 2026
 
+gemini:
+  session_start_stagger_seconds: 15
+
 stages:
   - id: main
     name: Main Stage
@@ -8,14 +11,14 @@ stages:
     targets:
       - es
     source:
-      type: replay
-      path: data/replay/main.json
+      type: file
+      path: data/audio/nerdearla-demo-main.wav
 
   - id: devroom
     name: Dev Room
-    language: es
+    language: en
     targets:
-      - en
+      - es
     source:
-      type: replay
-      path: data/replay/devroom.json
+      type: file
+      path: data/audio/nerdearla-demo-devroom.wav

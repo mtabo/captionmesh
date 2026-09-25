@@ -30,6 +30,11 @@ class GeminiConfig(BaseModel):
     # Gemini Live Transcribe sessions have a documented ~10 minute limit.
     # Default rotates a full minute before that, not at the exact boundary.
     session_rotation_seconds: float = 540.0
+    # Delay between starting consecutive stages. Gemini Live sessions opened
+    # within ~1s of each other on the same API key were measured producing
+    # one degraded session (first interim after ~12s, then silence);
+    # spacing session creation apart avoids that. 0 = start all at once.
+    session_start_stagger_seconds: float = 0.0
 
 
 class ConferenceConfig(BaseModel):

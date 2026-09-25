@@ -1,4 +1,5 @@
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,9 +8,21 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 
-from app.config import load_conference_config
+from app.config import FileSourceConfig, load_conference_config
 from app.supervisor import StageSupervisor
-from app.vtt import build_vtt
+from app.vtt import build_vtt, write_vtt_file
+
+# .wav is the canonical demo/fixture audio format (see docs/spec.md); map it
+# explicitly to the modern IANA type rather than trusting the local system's
+# mimetypes database, which commonly guesses the legacy "audio/x-wav" for it.
+# Anything else falls back to mimetypes' own guess.
+_AUDIO_MEDIA_TYPES = {".wav": "audio/wav"}
+
+
+def _guess_audio_media_type(path: Path) -> str:
+    guessed, _ = mimetypes.guess_type(str(path))
+    return _AUDIO_MEDIA_TYPES.get(path.suffix.lower()) or guessed or "application/octet-stream"
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -38,6 +51,21 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health():
     pipelines = supervisor.pipelines if supervisor else {}
+    stage_configs = supervisor.stage_configs if supervisor else {}
+
+    # Only stages backed by a real audio file are playable — a replay
+    # stage has no underlying file, so it's simply omitted from both of
+    # these rather than the audience UI inventing a player/position for it.
+    audio_url = {}
+    audio_position_ms = {}
+    for stage_id, config in stage_configs.items():
+        if not isinstance(config.source, FileSourceConfig):
+            continue
+        audio_url[stage_id] = f"/api/stages/{stage_id}/audio"
+        pipeline = pipelines.get(stage_id)
+        if pipeline is not None and pipeline.current_audio_position_ms is not None:
+            audio_position_ms[stage_id] = pipeline.current_audio_position_ms
+
     return {
         "status": "ok",
         "stages": {stage_id: p.status for stage_id, p in pipelines.items()},
@@ -45,6 +73,10 @@ async def health():
         "pending_translations": {
             stage_id: p.pending_translation_count for stage_id, p in pipelines.items()
         },
+        "audio_url": audio_url,
+        # Best-effort current position in that same audio, for the audience
+        # player to sync to (see StagePipeline.current_audio_position_ms).
+        "audio_position_ms": audio_position_ms,
     }
 
 
@@ -65,7 +97,32 @@ async def stage_captions_vtt(stage_id: str):
         raise HTTPException(status_code=404, detail="unknown stage")
 
     events = supervisor.store.read_events(stage_id)
-    return Response(content=build_vtt(events), media_type="text/vtt")
+    vtt_content = build_vtt(events)
+    # `stage_id` was just validated against known stages above, so this is
+    # safe to use as a filename (see write_vtt_file's own docstring). Kept
+    # as a snapshot on disk purely for convenience post-demo; the response
+    # below is always generated fresh from the event store, never from
+    # this file, so a stale file on disk can never cause a stale response.
+    write_vtt_file(stage_id, vtt_content)
+    return Response(content=vtt_content, media_type="text/vtt")
+
+
+@app.get("/api/stages/{stage_id}/audio")
+async def stage_audio(stage_id: str):
+    """Streams the exact audio file `FileAudioSource` is transcribing for
+    this stage, so the audience UI can play back what's actually being
+    captioned. `stage_id` only ever selects among the server's own
+    configured stages (never a client-supplied path), so there is no way
+    to reach an arbitrary filesystem path through this endpoint."""
+    stage_configs = supervisor.stage_configs if supervisor else {}
+    stage_config = stage_configs.get(stage_id)
+    if stage_config is None:
+        raise HTTPException(status_code=404, detail="unknown stage")
+    if not isinstance(stage_config.source, FileSourceConfig):
+        raise HTTPException(status_code=404, detail="stage has no playable audio source")
+
+    path = stage_config.source.path
+    return FileResponse(path, media_type=_guess_audio_media_type(path))
 
 
 @app.websocket("/ws/audience/{stage_id}")

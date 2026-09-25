@@ -18,6 +18,10 @@ RECEIVE_GRACE_SECONDS = 15
 # docs say cancelling a stuck send() is unsafe and recommend closing the
 # connection instead (see _send_with_timeout). This bounds that wait.
 SEND_TIMEOUT_SECONDS = 30
+
+# Shorter end-of-speech detection so Gemini closes finals at shorter pauses:
+# measured on the demo audio, finals went from 29/60/42 words to 15–27.
+END_OF_SPEECH_SILENCE_MS = 300
 BYTES_PER_MS = SAMPLE_RATE * SAMPLE_WIDTH_BYTES / 1000
 DRIFT_SAMPLE_INTERVAL_MS = 1000
 
@@ -119,6 +123,12 @@ class GeminiTranscriber:
             input_audio_transcription=types.AudioTranscriptionConfig(
                 language_codes=language_codes,
                 mode=self._mode,
+            ),
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    silence_duration_ms=END_OF_SPEECH_SILENCE_MS,
+                )
             ),
         )
         return client.aio.live.connect(model=self._model, config=config)

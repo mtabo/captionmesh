@@ -66,6 +66,7 @@
     font-size: 15px;
   }
   .translation { color: #8ab4f8; font-style: italic; margin-top: 4px; }
+  .audio-player { width: 100%; margin-top: 10px; }
   .dev-metrics {
     margin-top: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -85,7 +86,7 @@
   const stagesEl = document.getElementById("stages");
   const panels = {};
 
-  function createPanel(stageId) {
+  function createPanel(stageId, audioUrl) {
     const panel = document.createElement("div");
     panel.className = "panel";
     panel.innerHTML = `
@@ -95,6 +96,7 @@
       </h2>
       <div class="live" data-role="live"></div>
       <div class="dev-metrics" data-role="dev-metrics"></div>
+      ${audioUrl ? `<audio class="audio-player" data-role="audio" controls preload="none" src="${audioUrl}"></audio>` : ""}
       <div class="history" data-role="history"></div>
     `;
     stagesEl.appendChild(panel);
@@ -104,14 +106,27 @@
       wsBadge: panel.querySelector('[data-role="ws-badge"]'),
       stageBadge: panel.querySelector('[data-role="stage-badge"]'),
       devMetricsEl: panel.querySelector('[data-role="dev-metrics"]'),
+      audioEl: panel.querySelector('[data-role="audio"]'),
       currentSegId: null,
-      currentTranslationSegId: null,
+      // Connection/reconnect bookkeeping — see connect()/scheduleReconnect().
+      ws: null,
+      wsGeneration: 0,
+      reconnectTimer: null,
+      resetAttemptTimer: null,
+      reconnectAttempt: 0,
+      stageStatus: null,
     };
   }
 
+  // "connecting" (dialing) / "connected" (open) / "retrying" (closed, will
+  // retry after backoff — the stage is still running) / "closed" (closed,
+  // the stage ended, no further retries). No separate "disconnected" state:
+  // on close we always know immediately whether we'll retry or stop, so
+  // there's no moment where a distinct transient label would be visible.
   function setWsBadge(p, state) {
     p.wsBadge.textContent = "connection: " + state;
-    p.wsBadge.className = "badge " + (state === "connected" ? "ok" : state === "disconnected" ? "err" : "warn");
+    const cls = state === "connected" ? "ok" : state === "closed" ? "" : "warn";
+    p.wsBadge.className = "badge" + (cls ? " " + cls : "");
   }
 
   function setStageBadge(p, status) {
@@ -119,8 +134,9 @@
     p.stageBadge.className = "badge " + (status === "running" ? "ok" : status === "error" ? "err" : "warn");
   }
 
-  function addToHistory(p, text, translation) {
+  function addToHistory(p, text, translation, segId) {
     const div = document.createElement("div");
+    if (segId) div.dataset.segId = segId;
     const orig = document.createElement("p");
     orig.textContent = text;
     div.appendChild(orig);
@@ -136,6 +152,10 @@
     }
   }
 
+  function isSameOrDerivedSegment(baseSegId, candidateSegId) {
+    return baseSegId != null && (candidateSegId === baseSegId || candidateSegId.startsWith(baseSegId + "-"));
+  }
+
   function updateDevMetrics(p, data) {
     const parts = [data.type === "caption.final" ? "FINAL" : data.type === "caption.translation" ? "TRANSLATION" : "LIVE"];
     if (data.timing) {
@@ -147,50 +167,191 @@
     p.devMetricsEl.textContent = parts.join(" · ");
   }
 
+  const RECONNECT_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000]; // caps at 30s
+  const RECONNECT_RESET_AFTER_MS = 5000; // must stay open this long to count as "recovered"
+
+  function stageHasEnded(p) {
+    return p.stageStatus === "stopped" || p.stageStatus === "error";
+  }
+
+  function clearReconnectTimer(p) {
+    if (p.reconnectTimer !== null) {
+      clearTimeout(p.reconnectTimer);
+      p.reconnectTimer = null;
+    }
+  }
+
+  function scheduleReconnect(stageId, p) {
+    const delay = RECONNECT_BACKOFF_MS[Math.min(p.reconnectAttempt, RECONNECT_BACKOFF_MS.length - 1)];
+    p.reconnectAttempt++;
+    const generation = p.wsGeneration;
+    clearReconnectTimer(p);
+    p.reconnectTimer = setTimeout(() => {
+      p.reconnectTimer = null;
+      // Stale timer: a newer connection attempt already superseded this one.
+      if (generation !== p.wsGeneration) return;
+      // The stage ended while this timer was pending — don't reconnect.
+      if (stageHasEnded(p)) {
+        setWsBadge(p, "closed");
+        return;
+      }
+      connect(stageId, p);
+    }, delay);
+  }
+
   function pollStageStatus(stageId, p) {
     fetch("/health")
       .then((r) => r.json())
-      .then((data) => setStageBadge(p, (data.stages && data.stages[stageId]) || "unknown"))
+      .then((data) => {
+        const status = (data.stages && data.stages[stageId]) || "unknown";
+        const previousStatus = p.stageStatus;
+        p.stageStatus = status;
+        setStageBadge(p, status);
+
+        if (stageHasEnded(p)) {
+          // A reconnect timer left over from before the stage ended must
+          // not fire and open a new socket to a stage that's now done.
+          if (p.reconnectTimer !== null) {
+            clearReconnectTimer(p);
+            setWsBadge(p, "closed");
+          }
+        } else if (
+          status === "running" &&
+          (previousStatus === "stopped" || previousStatus === "error") &&
+          !(p.ws && (p.ws.readyState === WebSocket.OPEN || p.ws.readyState === WebSocket.CONNECTING))
+        ) {
+          // The stage came back — allow reconnecting from a clean slate.
+          p.reconnectAttempt = 0;
+          connect(stageId, p);
+        }
+      })
       .catch(() => setStageBadge(p, "unknown"));
   }
 
   function connect(stageId, p) {
+    // Never open a second socket for the same stage while one is already
+    // open or mid-handshake.
+    if (p.ws && (p.ws.readyState === WebSocket.OPEN || p.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    clearReconnectTimer(p);
+    p.wsGeneration++;
+    const generation = p.wsGeneration;
     setWsBadge(p, "connecting");
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/ws/audience/${encodeURIComponent(stageId)}`);
+    p.ws = ws;
 
-    ws.onopen = () => setWsBadge(p, "connected");
+    ws.onopen = () => {
+      if (generation !== p.wsGeneration) return;
+      setWsBadge(p, "connected");
+      // Only counts as "recovered" (backoff reset) once the connection has
+      // stayed open for a bit — an immediate open-then-close (server
+      // accepting and instantly dropping) must not reset the counter back
+      // to 2s, or backoff never actually protects a struggling server.
+      p.resetAttemptTimer = setTimeout(() => {
+        p.resetAttemptTimer = null;
+        p.reconnectAttempt = 0;
+      }, RECONNECT_RESET_AFTER_MS);
+    };
 
     ws.onmessage = (event) => {
+      if (generation !== p.wsGeneration) return;
       const data = JSON.parse(event.data);
       if (data.type === "caption.interim") {
         p.currentSegId = data.seg_id;
         p.liveEl.textContent = data.text;
       } else if (data.type === "caption.final") {
-        if (p.currentSegId === data.seg_id) {
+        // A final's seg_id may be a derived sub-segment of the live
+        // interim's seg_id (e.g. interim "main-000005" -> finals
+        // "main-000005-1", "main-000005-2", ... after segmentation) — treat
+        // any of those as "this is what the live line was showing".
+        if (isSameOrDerivedSegment(p.currentSegId, data.seg_id)) {
           p.liveEl.textContent = "";
           p.currentSegId = null;
         }
-        p.currentTranslationSegId = data.seg_id;
-        addToHistory(p, data.text, null);
+        addToHistory(p, data.text, null, data.seg_id);
       } else if (data.type === "caption.translation") {
-        // Attach to the matching final already in history, if present.
-        if (p.historyEl.firstElementChild && p.currentTranslationSegId === data.seg_id) {
+        // Attach to the matching final by seg_id — with short sentence
+        // captions, a translation often arrives after newer finals.
+        const entry = [...p.historyEl.children].find((el) => el.dataset.segId === data.seg_id);
+        if (entry && !entry.querySelector(".translation")) {
           const t = document.createElement("p");
           t.className = "translation";
           t.textContent = data.text;
-          p.historyEl.firstElementChild.appendChild(t);
+          entry.appendChild(t);
         }
       }
       updateDevMetrics(p, data);
     };
 
     ws.onclose = () => {
-      setWsBadge(p, "disconnected");
-      setTimeout(() => connect(stageId, p), 2000);
+      if (generation !== p.wsGeneration) return;
+      if (p.resetAttemptTimer !== null) {
+        clearTimeout(p.resetAttemptTimer);
+        p.resetAttemptTimer = null;
+      }
+      p.ws = null;
+      if (stageHasEnded(p)) {
+        setWsBadge(p, "closed");
+        return;
+      }
+      setWsBadge(p, "retrying");
+      scheduleReconnect(stageId, p);
     };
 
     ws.onerror = () => ws.close();
+  }
+
+  // On Play, sync the player to the stage's current processing position
+  // (from /health's audio_position_ms) instead of letting the browser
+  // start the file at 0:00 — CaptionMesh may already be minutes into it.
+  // Every Play (including resuming after a pause) re-syncs; a stopped
+  // stage is left alone (no position to chase, normal playback applies).
+  function attachAudioSync(stageId, p) {
+    if (!p.audioEl) return;
+
+    function ensureMetadataLoaded() {
+      if (p.audioEl.readyState > 0) return Promise.resolve(); // HAVE_METADATA or better already
+      return new Promise((resolve) => {
+        p.audioEl.addEventListener("loadedmetadata", resolve, { once: true });
+        p.audioEl.load(); // preload="none" means nothing has loaded yet
+      });
+    }
+
+    // Distinguishes a real user-initiated Play from the programmatic
+    // .play() this handler itself issues after seeking — without this,
+    // that second .play() would re-trigger this same handler forever.
+    let programmaticPlay = false;
+
+    p.audioEl.addEventListener("play", () => {
+      if (programmaticPlay) {
+        programmaticPlay = false;
+        return;
+      }
+      p.audioEl.pause(); // stop the default 0:00 playback before it's audible
+      (async () => {
+        try {
+          const health = await fetch("/health").then((r) => r.json());
+          const status = health.stages && health.stages[stageId];
+          const positionMs = health.audio_position_ms && health.audio_position_ms[stageId];
+          if (status === "running" && typeof positionMs === "number") {
+            await ensureMetadataLoaded();
+            p.audioEl.currentTime = positionMs / 1000;
+          }
+          // Stopped/unknown/no position: leave currentTime untouched —
+          // normal <audio> behavior (resume or start from 0) applies.
+        } catch (e) {
+          // /health fetch failed — fail open, just play from wherever
+          // currentTime already is rather than blocking playback.
+        } finally {
+          programmaticPlay = true;
+          p.audioEl.play().catch(() => {
+            programmaticPlay = false;
+          });
+        }
+      })();
+    });
   }
 
   fetch("/health")
@@ -201,10 +362,12 @@
         stagesEl.textContent = "No stages configured.";
         return;
       }
+      const audioUrls = data.audio_url || {};
       for (const stageId of stageIds) {
-        const p = createPanel(stageId);
+        const p = createPanel(stageId, audioUrls[stageId]);
         panels[stageId] = p;
         connect(stageId, p);
+        attachAudioSync(stageId, p);
         pollStageStatus(stageId, p);
         setInterval(() => pollStageStatus(stageId, p), 5000);
       }

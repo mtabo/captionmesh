@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.vtt import _format_timestamp, build_vtt
+from app.vtt import _format_timestamp, build_vtt, write_vtt_file
 
 
 def final(seg_id, text, audio_elapsed_ms, stage_id="main"):
@@ -157,3 +157,48 @@ def test_format_timestamp_produces_hh_mm_ss_mmm():
     assert _format_timestamp(1500) == "00:00:01.500"
     assert _format_timestamp(61_000) == "00:01:01.000"
     assert _format_timestamp(3_661_250) == "01:01:01.250"
+
+
+def test_write_vtt_file_creates_the_directory_and_the_file(tmp_path):
+    base_dir = tmp_path / "vtt"
+    vtt = build_vtt([final("main-000001", "Hello.", 1000.0)])
+
+    path = write_vtt_file("main", vtt, base_dir=base_dir)
+
+    assert path == base_dir / "main.vtt"
+    assert path.read_text(encoding="utf-8") == vtt
+
+
+def test_write_vtt_file_is_a_valid_snapshot_even_when_empty(tmp_path):
+    base_dir = tmp_path / "vtt"
+    vtt = build_vtt([])  # no captions yet — not an error
+
+    path = write_vtt_file("devroom", vtt, base_dir=base_dir)
+
+    assert path.read_text(encoding="utf-8") == "WEBVTT\n"
+
+
+def test_write_vtt_file_overwrites_the_previous_snapshot(tmp_path):
+    base_dir = tmp_path / "vtt"
+    write_vtt_file("main", build_vtt([final("main-000001", "First.", 1000.0)]), base_dir=base_dir)
+
+    updated = build_vtt([
+        final("main-000001", "First.", 1000.0),
+        final("main-000002", "Second.", 2000.0),
+    ])
+    path = write_vtt_file("main", updated, base_dir=base_dir)
+
+    assert "Second." in path.read_text(encoding="utf-8")
+
+
+def test_write_vtt_file_keeps_different_stages_in_separate_files(tmp_path):
+    base_dir = tmp_path / "vtt"
+    main_path = write_vtt_file("main", build_vtt([final("main-000001", "Main text.", 1000.0)]), base_dir=base_dir)
+    devroom_path = write_vtt_file(
+        "devroom", build_vtt([final("devroom-000001", "Devroom text.", 1000.0)]), base_dir=base_dir
+    )
+
+    assert main_path != devroom_path
+    assert "Main text." in main_path.read_text(encoding="utf-8")
+    assert "Devroom text." in devroom_path.read_text(encoding="utf-8")
+    assert "Devroom text." not in main_path.read_text(encoding="utf-8")

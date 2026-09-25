@@ -25,6 +25,15 @@ class FakeTranslator:
         return f"[{target_language}] {text}"
 
 
+class FakeSegmenter:
+    """A SegmentationProvider stub — keeps supervisor tests network-free.
+    Never splits, so pre-existing seg_id/behavior assertions in these tests
+    (written before segmentation existed) stay valid unchanged."""
+
+    async def segment(self, text: str) -> list[str]:
+        return [text]
+
+
 SEGMENTS_MAIN = [
     {"delay_ms": 0, "text": "Hi", "is_final": False},
     {"delay_ms": 0, "text": "Hi.", "is_final": True, "language": "en"},
@@ -59,7 +68,8 @@ def make_two_stage_conference(tmp_path: Path, with_targets: bool = False) -> Con
 async def test_two_stages_can_be_created_from_configuration(tmp_path):
     conference = make_two_stage_conference(tmp_path)
     supervisor = StageSupervisor(
-        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path), translator=FakeTranslator()
+        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path),
+        translator=FakeTranslator(), segmenter=FakeSegmenter()
     )
 
     supervisor.start_all()
@@ -71,7 +81,8 @@ async def test_two_stages_can_be_created_from_configuration(tmp_path):
 async def test_both_pipelines_run_concurrently_and_reach_stopped(tmp_path):
     conference = make_two_stage_conference(tmp_path)
     supervisor = StageSupervisor(
-        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path), translator=FakeTranslator()
+        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path),
+        translator=FakeTranslator(), segmenter=FakeSegmenter()
     )
 
     supervisor.start_all()
@@ -93,6 +104,7 @@ async def test_stage_events_never_cross_between_stages(tmp_path):
         broadcaster=broadcaster,
         store=JsonlEventStore(base_dir=tmp_path),
         translator=FakeTranslator(),
+        segmenter=FakeSegmenter(),
     )
     supervisor.start_all()
     await asyncio.wait_for(asyncio.gather(*supervisor._tasks), timeout=2.0)
@@ -118,7 +130,8 @@ async def test_stage_events_never_cross_between_stages(tmp_path):
 async def test_seg_id_sequences_are_independent_per_stage(tmp_path):
     conference = make_two_stage_conference(tmp_path)
     supervisor = StageSupervisor(
-        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path), translator=FakeTranslator()
+        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path),
+        translator=FakeTranslator(), segmenter=FakeSegmenter()
     )
 
     supervisor.start_all()
@@ -134,7 +147,8 @@ async def test_seg_id_sequences_are_independent_per_stage(tmp_path):
 async def test_each_stage_persists_independently(tmp_path):
     conference = make_two_stage_conference(tmp_path)
     supervisor = StageSupervisor(
-        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path), translator=FakeTranslator()
+        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path),
+        translator=FakeTranslator(), segmenter=FakeSegmenter()
     )
 
     supervisor.start_all()
@@ -153,7 +167,8 @@ async def test_a_slow_translation_in_one_stage_does_not_block_the_other(tmp_path
     conference = make_two_stage_conference(tmp_path, with_targets=True)
     slow_translator = FakeTranslator(delay=999)  # deliberately never resolves in time
     supervisor = StageSupervisor(
-        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path), translator=slow_translator
+        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path),
+        translator=slow_translator, segmenter=FakeSegmenter()
     )
 
     supervisor.start_all()
@@ -179,7 +194,8 @@ async def test_stopping_the_supervisor_stops_all_pipelines_cleanly(tmp_path):
         ]
     )
     supervisor = StageSupervisor(
-        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path), translator=FakeTranslator()
+        conference, api_key="unused", store=JsonlEventStore(base_dir=tmp_path),
+        translator=FakeTranslator(), segmenter=FakeSegmenter()
     )
 
     supervisor.start_all()

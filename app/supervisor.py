@@ -6,7 +6,7 @@ from app.broadcast import Broadcaster
 from app.config import ConferenceConfig, FileSourceConfig, ReplaySourceConfig, StageConfig
 from app.providers.gemini_asr import GeminiTranscriber
 from app.providers.gemini_translate import GeminiTranslator
-from app.providers import TranslationProvider
+from app.providers import SegmentationProvider, TranslationProvider
 from app.providers.replay import ReplayTranscriber
 from app.sources.ffmpeg import FileAudioSource
 from app.stage import StagePipeline
@@ -18,6 +18,13 @@ from app.store import JsonlEventStore
 # a real multi-segment run. Explicit override via GeminiTranslator's existing
 # `model` param — the class default is untouched.
 TRANSLATOR_MODEL = "gemini-3.5-flash-lite"
+
+# Gemini Live transcription mode. Measured back-to-back on the same demo
+# audio: SMART (the class default) buffered heavily and emitted a single
+# ~160-word paragraph final ~47s after the audio ended; VERBATIM produced
+# interims every ~0.5s and sentence-sized finals in real time. Live captions
+# need the latter; the trade-off is that disfluencies are no longer removed.
+TRANSCRIBE_MODE = "VERBATIM"
 
 
 class StageSupervisor:
@@ -38,13 +45,20 @@ class StageSupervisor:
         broadcaster: Optional[Broadcaster] = None,
         store: Optional[JsonlEventStore] = None,
         translator: Optional[TranslationProvider] = None,
+        segmenter: Optional[SegmentationProvider] = None,
     ) -> None:
         self._conference = conference
         self._api_key = api_key
         self.broadcaster = broadcaster or Broadcaster()
         self.store = store or JsonlEventStore()
         self._translator = translator or GeminiTranslator(api_key=api_key, model=TRANSLATOR_MODEL)
+        # No default segmenter: a per-final Gemini segmentation call sits on
+        # the caption's critical path and was measured timing out (10s) under
+        # load. Finals are emitted as Gemini produced them unless one is
+        # explicitly injected.
+        self._segmenter = segmenter
         self.pipelines: dict[str, StagePipeline] = {}
+        self.stage_configs: dict[str, StageConfig] = {s.id: s for s in conference.stages}
         self._tasks: list[asyncio.Task] = []
 
     def _build_pipeline(self, stage_config: StageConfig) -> StagePipeline:
@@ -53,6 +67,7 @@ class StageSupervisor:
             transcriber = GeminiTranscriber(
                 api_key=self._api_key,
                 language=stage_config.language,
+                mode=TRANSCRIBE_MODE,
                 session_rotation_seconds=self._conference.gemini.session_rotation_seconds,
             )
             audio_source = FileAudioSource(Path(source.path))
@@ -68,14 +83,22 @@ class StageSupervisor:
             self.store,
             self.broadcaster,
             self._translator,
+            segmenter=self._segmenter,
             audio_source=audio_source,
         )
 
     def start_all(self) -> None:
-        for stage_config in self._conference.stages:
+        stagger = self._conference.gemini.session_start_stagger_seconds
+        for index, stage_config in enumerate(self._conference.stages):
             pipeline = self._build_pipeline(stage_config)
             self.pipelines[stage_config.id] = pipeline
-            self._tasks.append(asyncio.create_task(pipeline.run()))
+            self._tasks.append(asyncio.create_task(self._run_after(pipeline, index * stagger)))
+
+    @staticmethod
+    async def _run_after(pipeline: StagePipeline, delay_seconds: float) -> None:
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        await pipeline.run()
 
     async def stop_all(self) -> None:
         for task in self._tasks:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -43,6 +44,35 @@ class FakeTranslator:
         if target_language in self._fail_for:
             raise RuntimeError("translation failed")
         return f"[{target_language}] {text}"
+
+
+class FakeSegmenter:
+    """A SegmentationProvider stub.
+
+    `results` maps an exact input text to the list[str] it should return;
+    any text not in the map is returned unchanged as a single segment
+    (mirrors the "no split needed" case). `fail_for` raises for those exact
+    texts. `hang_for` blocks until `release()` is called — used to prove
+    the segmentation timeout/fallback actually bounds a stuck call.
+    """
+
+    def __init__(self, results=None, fail_for=frozenset(), hang_for=frozenset()):
+        self.calls = []
+        self._results = results or {}
+        self._fail_for = fail_for
+        self._hang_for = hang_for
+        self._release = asyncio.Event()
+
+    async def segment(self, text: str) -> list[str]:
+        self.calls.append(text)
+        if text in self._hang_for:
+            await self._release.wait()
+        if text in self._fail_for:
+            raise RuntimeError("segmentation failed")
+        return self._results.get(text, [text])
+
+    def release(self) -> None:
+        self._release.set()
 
 
 class SlowTranslator:
@@ -148,8 +178,16 @@ async def test_a_new_segment_after_final_gets_a_new_seg_id(tmp_path):
 
     await pipeline.run()
 
-    seg_ids = [e.seg_id for e in broadcaster.published]
-    assert seg_ids == ["main-000001", "main-000001", "main-000002", "main-000002"]
+    # Interims are published immediately as they arrive; finals are handed
+    # off to the segmentation worker and only published once it processes
+    # them (see StagePipeline._run_segmentation_worker), so with a
+    # zero-await FakeTranscriber all interims land before any final —
+    # each stream is still independently in the right order, which is
+    # what this test is actually about.
+    interim_seg_ids = [e.seg_id for e in broadcaster.published if e.type == "caption.interim"]
+    final_seg_ids = [e.seg_id for e in broadcaster.published if e.type == "caption.final"]
+    assert interim_seg_ids == ["main-000001", "main-000002"]
+    assert final_seg_ids == ["main-000001", "main-000002"]
 
 
 async def test_interim_events_are_broadcast_but_final_events_are_broadcast_and_persisted(tmp_path):
@@ -441,7 +479,12 @@ async def test_subsequent_finals_are_processed_while_an_earlier_translation_is_s
     )
 
     run_task = asyncio.create_task(pipeline.run())
-    await asyncio.sleep(0)  # let run() advance to its first real suspension point
+    # Finals are now handed off to a separate segmentation-worker task (see
+    # StagePipeline._run_segmentation_worker) rather than published inline,
+    # so give it a couple of real event-loop turns to actually drain the
+    # queue and schedule translations — a single sleep(0) is not enough to
+    # guarantee that worker has run yet.
+    await asyncio.sleep(0.01)
 
     # Both finals already processed even though neither translation has resolved.
     finals = [e for e in broadcaster.published if e.type == "caption.final"]
@@ -471,7 +514,9 @@ async def test_multiple_translation_tasks_for_one_final_are_pending_independentl
     )
 
     run_task = asyncio.create_task(pipeline.run())
-    await asyncio.sleep(0)
+    # See comment in the previous test — the segmentation worker needs a
+    # couple of real turns to drain its queue before translations exist.
+    await asyncio.sleep(0.01)
 
     assert pipeline.pending_translation_count == 2
 
@@ -531,3 +576,335 @@ async def test_a_translation_that_completes_within_the_grace_window_is_not_cance
 
     translations = [e for e in broadcaster.published if e.type == "caption.translation"]
     assert [t.text for t in translations] == ["[es] Hello."]
+
+
+async def test_a_split_final_gets_derived_seg_ids_for_each_sub_segment(tmp_path):
+    segments = [TranscriptSegment(text="Hello. World.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter(results={"Hello. World.": ["Hello.", "World."]})
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster, segmenter=segmenter
+    )
+
+    await pipeline.run()
+
+    finals = [e for e in broadcaster.published if e.type == "caption.final"]
+    assert [f.text for f in finals] == ["Hello.", "World."]
+    assert [f.seg_id for f in finals] == ["main-000001-1", "main-000001-2"]
+
+
+async def test_a_single_returned_segment_keeps_the_plain_seg_id(tmp_path):
+    """Even with a real segmenter configured, if it decides not to split
+    (or there was nothing to split), the derived "-N" suffix is not
+    introduced — the plain seg_id format stays unchanged."""
+    segments = [TranscriptSegment(text="Hi.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter()  # returns [text] unchanged for anything not in `results`
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster, segmenter=segmenter
+    )
+
+    await pipeline.run()
+
+    finals = [e for e in broadcaster.published if e.type == "caption.final"]
+    assert [f.seg_id for f in finals] == ["main-000001"]
+
+
+async def test_each_sub_segment_gets_its_own_independent_translation(tmp_path):
+    segments = [TranscriptSegment(text="Hello. World.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter(results={"Hello. World.": ["Hello.", "World."]})
+    translator = FakeTranslator()
+    pipeline = StagePipeline(
+        make_stage_config(targets=["es"]),
+        FakeTranscriber(segments),
+        store,
+        broadcaster,
+        translator,
+        segmenter=segmenter,
+    )
+
+    await pipeline.run()
+
+    assert translator.calls == [("Hello.", "en", "es"), ("World.", "en", "es")]
+    translations = [e for e in broadcaster.published if e.type == "caption.translation"]
+    assert {(t.seg_id, t.text) for t in translations} == {
+        ("main-000001-1", "[es] Hello."),
+        ("main-000001-2", "[es] World."),
+    }
+
+
+async def test_segmentation_failure_falls_back_to_the_original_text_as_one_segment(tmp_path):
+    segments = [TranscriptSegment(text="Hello there.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter(fail_for={"Hello there."})
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster, segmenter=segmenter
+    )
+
+    await pipeline.run()  # must not raise — the caption is never lost
+
+    finals = [e for e in broadcaster.published if e.type == "caption.final"]
+    assert [f.text for f in finals] == ["Hello there."]
+    assert [f.seg_id for f in finals] == ["main-000001"]  # no derived suffix — fallback is one segment
+
+
+async def test_segmentation_returning_no_segments_falls_back_to_the_original_text(tmp_path):
+    segments = [TranscriptSegment(text="Hello there.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter(results={"Hello there.": []})
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster, segmenter=segmenter
+    )
+
+    await pipeline.run()  # must not raise
+
+    finals = [e for e in broadcaster.published if e.type == "caption.final"]
+    assert [f.text for f in finals] == ["Hello there."]
+
+
+async def test_segmentation_timeout_falls_back_to_the_original_text(tmp_path):
+    """A segmenter that never resolves must not prevent run() from
+    finishing, and must not lose the caption — proves the timeout bound
+    around the segmentation call actually works, not just failure handling."""
+    segments = [TranscriptSegment(text="Hello there.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter(hang_for={"Hello there."})  # never released in this test
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]),
+        FakeTranscriber(segments),
+        store,
+        broadcaster,
+        segmenter=segmenter,
+        segmentation_timeout_seconds=0.05,
+    )
+
+    await asyncio.wait_for(pipeline.run(), timeout=2.0)
+
+    assert pipeline.status == "stopped"
+    finals = [e for e in broadcaster.published if e.type == "caption.final"]
+    assert [f.text for f in finals] == ["Hello there."]
+
+
+async def test_sub_segments_are_emitted_in_the_order_the_segmenter_returned_them(tmp_path):
+    segments = [TranscriptSegment(text="A. B. C.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    segmenter = FakeSegmenter(results={"A. B. C.": ["A.", "B.", "C."]})
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster, segmenter=segmenter
+    )
+
+    await pipeline.run()
+
+    persisted = [json.loads(line) for line in (tmp_path / "main.jsonl").read_text().splitlines()]
+    assert [e["text"] for e in persisted] == ["A.", "B.", "C."]
+    assert [e["seg_id"] for e in persisted] == ["main-000001-1", "main-000001-2", "main-000001-3"]
+
+
+async def test_current_audio_position_ms_is_none_before_any_timed_segment(tmp_path):
+    store = JsonlEventStore(base_dir=tmp_path)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber([]), store, Broadcaster())
+
+    assert pipeline.current_audio_position_ms is None
+
+
+async def test_current_audio_position_ms_interpolates_forward_while_running(tmp_path):
+    segments = [
+        TranscriptSegment(text="partial", is_final=False, audio_elapsed_ms=1000.0, asr_latency_ms=50.0),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, Broadcaster())
+
+    pipeline.status = "running"
+    pipeline._handle_interim(segments[0])
+    position_immediately_after = pipeline.current_audio_position_ms
+    assert position_immediately_after is not None
+    assert position_immediately_after >= 1000.0
+
+    await asyncio.sleep(0.05)
+    position_later = pipeline.current_audio_position_ms
+    assert position_later > position_immediately_after  # interpolated forward
+
+
+async def test_current_audio_position_ms_freezes_once_not_running(tmp_path):
+    segments = [
+        TranscriptSegment(text="final.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, Broadcaster())
+
+    await pipeline.run()  # ends with status == "stopped"
+
+    assert pipeline.status == "stopped"
+    frozen = pipeline.current_audio_position_ms
+    assert frozen == 1000.0
+    await asyncio.sleep(0.05)
+    assert pipeline.current_audio_position_ms == frozen  # no further extrapolation
+
+
+async def test_current_audio_position_ms_caps_extrapolation_when_stale(tmp_path):
+    from app.stage import MAX_AUDIO_POSITION_EXTRAPOLATION_MS
+
+    store = JsonlEventStore(base_dir=tmp_path)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber([]), store, Broadcaster())
+    pipeline.status = "running"
+    pipeline._latest_audio_elapsed_ms = 1000.0
+    pipeline._latest_audio_position_updated_at = time.monotonic() - 3600  # an hour stale
+
+    position = pipeline.current_audio_position_ms
+
+    assert position == 1000.0 + MAX_AUDIO_POSITION_EXTRAPOLATION_MS  # capped, not 3.6M ms later
+
+
+async def test_interim_sentences_are_committed_progressively_and_final_only_adds_the_tail(tmp_path):
+    texts = [
+        "I", "I am", "I am testing", "I am testing CaptionMesh.",
+        "I am testing CaptionMesh. This", "I am testing CaptionMesh. This is",
+        "I am testing CaptionMesh. This is a demo.",
+    ]
+    segments = [TranscriptSegment(text=t, is_final=False, language="en") for t in texts]
+    segments.append(TranscriptSegment(text="I am testing CaptionMesh. This is a demo.", is_final=True, language="en"))
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    translator = FakeTranslator()
+    pipeline = StagePipeline(
+        make_stage_config(targets=["es"]), FakeTranscriber(segments), store, broadcaster, translator
+    )
+
+    await pipeline.run()
+
+    finals = [e for e in broadcaster.published if e.type == "caption.final"]
+    assert [(f.seg_id, f.text) for f in finals] == [
+        ("main-000001-1", "I am testing CaptionMesh."),
+        ("main-000001-2", "This is a demo."),
+    ]
+    # Each sentence translated exactly once — never the whole paragraph, never twice.
+    assert translator.calls == [
+        ("I am testing CaptionMesh.", "en", "es"),
+        ("This is a demo.", "en", "es"),
+    ]
+    # The live interim only ever shows the sentence still under construction.
+    interims = [e.text for e in broadcaster.published if e.type == "caption.interim"]
+    assert "This is" in interims
+    assert not any(t.startswith("I am testing CaptionMesh. This") for t in interims)
+
+
+async def test_committed_sentence_is_emitted_before_the_final_arrives(tmp_path):
+    segments = [
+        TranscriptSegment(text="First one. Second", is_final=False, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()  # no final ever arrives
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == ["First one."]
+
+
+async def test_a_multi_sentence_final_without_prior_commits_is_split_per_sentence(tmp_path):
+    segments = [TranscriptSegment(text="Connection to the audience. It runs on FastAPI.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    translator = FakeTranslator()
+    pipeline = StagePipeline(
+        make_stage_config(targets=["es"]), FakeTranscriber(segments), store, broadcaster, translator
+    )
+
+    await pipeline.run()
+
+    finals = [(e.seg_id, e.text) for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == [
+        ("main-000001-1", "Connection to the audience."),
+        ("main-000001-2", "It runs on FastAPI."),
+    ]
+    assert [c[0] for c in translator.calls] == ["Connection to the audience.", "It runs on FastAPI."]
+
+
+async def test_gemini_resent_and_restarted_finals_are_not_duplicated(tmp_path):
+    """Exact sequence observed from Gemini with short end-of-speech detection:
+    a re-sent previous final, and a sentence restarted after a mid-way final."""
+    segments = [
+        TranscriptSegment(text="Contributors do not need to install anything.", is_final=True, language="en"),
+        TranscriptSegment(text="The system is designed to scale from a single stage running on", is_final=True, language="en"),
+        TranscriptSegment(text="Contributors do not need to install anything.", is_final=True, language="en"),
+        TranscriptSegment(
+            text="The system is designed to scale from a single stage running on one laptop.",
+            is_final=True, language="en",
+        ),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    translator = FakeTranslator()
+    pipeline = StagePipeline(
+        make_stage_config(targets=["es"]), FakeTranscriber(segments), store, broadcaster, translator
+    )
+
+    await pipeline.run()
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == [
+        "Contributors do not need to install anything.",
+        "The system is designed to scale from a single stage running on",
+        "one laptop.",
+    ]
+    assert len(translator.calls) == 3  # nothing translated twice
+
+
+async def test_a_resent_variant_of_recent_captions_only_adds_its_new_part(tmp_path):
+    """Observed: Gemini re-sent two already-published sentences as one
+    variant with different casing/punctuation, followed by new speech."""
+    segments = [
+        TranscriptSegment(text="WebSocket connection to the audience.", is_final=True, language="en"),
+        TranscriptSegment(text="CaptionMesh runs as a FastAPI application.", is_final=True, language="en"),
+        TranscriptSegment(
+            text="WebSocket connection to the audience caption mesh runs as a fast API application and uses Docker",
+            is_final=True, language="en",
+        ),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == [
+        "WebSocket connection to the audience.",
+        "CaptionMesh runs as a FastAPI application.",
+        "and uses Docker",
+    ]
+
+
+async def test_a_turn_that_restarts_without_a_final_publishes_its_unfinished_tail(tmp_path):
+    """Observed: Gemini began a new turn without ever finalizing the previous
+    one — its text must not silently vanish from the live line."""
+    segments = [
+        TranscriptSegment(text="Every audio source", is_final=False, language="en"),
+        TranscriptSegment(text="Every audio source is normalized with FFmpeg", is_final=False, language="en"),
+        TranscriptSegment(text="transcription pipeline", is_final=False, language="en"),
+        TranscriptSegment(text="Transcription pipeline and live subtitles.", is_final=True, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    translator = FakeTranslator()
+    pipeline = StagePipeline(
+        make_stage_config(targets=["es"]), FakeTranscriber(segments), store, broadcaster, translator
+    )
+
+    await pipeline.run()
+
+    finals = [(e.seg_id, e.text) for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == [
+        ("main-000001", "Every audio source is normalized with FFmpeg"),
+        ("main-000002", "Transcription pipeline and live subtitles."),
+    ]
+    assert len(translator.calls) == 2

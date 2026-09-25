@@ -47,12 +47,14 @@ data/audio/*
 data/stages/*
 data/runtime/*
 data/tmp/*
+data/vtt/*
 
 # Keep directory structure
 !data/audio/.gitkeep
 !data/stages/.gitkeep
 !data/runtime/.gitkeep
 !data/tmp/.gitkeep
+!data/vtt/.gitkeep
 
 # Logs
 *.log

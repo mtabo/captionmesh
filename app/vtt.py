@@ -24,7 +24,10 @@ Timing is intentionally honest, not invented:
   timestamp. See README for this limitation.
 """
 
+from pathlib import Path
+
 WEBVTT_HEADER = "WEBVTT"
+VTT_OUTPUT_DIR = Path("data/vtt")
 
 
 def _format_timestamp(ms: float) -> str:
@@ -70,3 +73,19 @@ def build_vtt(events: list[dict]) -> str:
         previous_end_ms = end_ms
 
     return "\n".join(lines)
+
+
+def write_vtt_file(stage_id: str, vtt_content: str, base_dir: Path = VTT_OUTPUT_DIR) -> Path:
+    """Persists a generated WebVTT document as <base_dir>/<stage_id>.vtt.
+
+    The JSONL event store remains the only source of truth; this file is
+    just a materialized snapshot of `build_vtt`'s output, safe to delete
+    and regenerate at any time. The caller (the `captions.vtt` endpoint) is
+    responsible for validating `stage_id` against known stages before
+    calling this — it is only ever used to build a filename here, never a
+    directory path, so it cannot escape `base_dir`.
+    """
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / f"{stage_id}.vtt"
+    path.write_text(vtt_content, encoding="utf-8")
+    return path

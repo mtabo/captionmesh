@@ -28,3 +28,8 @@ class TranscriptionProvider(Protocol):
 class TranslationProvider(Protocol):
     async def translate(self, text: str, source_language: str, target_language: str) -> str:
         ...
+
+
+class SegmentationProvider(Protocol):
+    async def segment(self, text: str) -> list[str]:
+        ...

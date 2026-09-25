@@ -1,0 +1,13 @@
+[
+  {"delay_ms": 300, "text": "Bienvenidos", "is_final": false},
+  {"delay_ms": 14000, "text": "Bienvenidos a la sala de desarrollo", "is_final": false},
+  {"delay_ms": 14000, "text": "Bienvenidos a la sala de desarrollo.", "is_final": true, "language": "es"},
+
+  {"delay_ms": 300, "text": "Hoy vamos a hablar sobre", "is_final": false},
+  {"delay_ms": 14000, "text": "Hoy vamos a hablar sobre arquitecturas modernas", "is_final": false},
+  {"delay_ms": 14000, "text": "Hoy vamos a hablar sobre arquitecturas modernas de software.", "is_final": true, "language": "es"},
+
+  {"delay_ms": 300, "text": "También veremos", "is_final": false},
+  {"delay_ms": 14000, "text": "También veremos cómo escalar nuestros sistemas", "is_final": false},
+  {"delay_ms": 14000, "text": "También veremos cómo escalar nuestros sistemas de forma independiente.", "is_final": true, "language": "es"}
+]
