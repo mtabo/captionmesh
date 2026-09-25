@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -136,6 +136,11 @@ class StagePipeline:
         # only production call site) passes VTT_OUTPUT_DIR explicitly.
         self._vtt_output_dir = vtt_output_dir
         self._vtt_timestamp_fn = vtt_timestamp_fn
+        # When this run() started — see _events_from_this_session. The
+        # event store is cumulative across every past run of this stage_id
+        # (by design: a stage restarted against the same data/ volume keeps
+        # its history), so it can hold captions from earlier sessions too.
+        self._session_started_at: Optional[datetime] = None
         self._seg_counter = 0
         self._current_seg_id: str | None = None
         self.status = "created"
@@ -192,6 +197,10 @@ class StagePipeline:
 
     async def run(self) -> None:
         self.status = "running"
+        # Recorded before anything from this session can possibly be
+        # persisted, so every event this session produces is guaranteed to
+        # have ts >= this — see _events_from_this_session.
+        self._session_started_at = datetime.now(timezone.utc)
         self._segmentation_task = asyncio.create_task(self._run_segmentation_worker())
         try:
             audio_chunks = (
@@ -216,16 +225,44 @@ class StagePipeline:
                 # in "error" (its event stream may be incomplete/mid-final).
                 self._write_session_vtt()
 
+    def _events_from_this_session(self, events: list[dict]) -> list[dict]:
+        """Scopes `events` (the full persisted history for this stage_id)
+        down to just this session's own events, by `ts`.
+
+        The event store is intentionally cumulative — a stage restarted
+        against the same data/ volume keeps its prior JSONL history, which
+        is correct for the store itself. But feeding that whole history
+        into one VTT timeline chains together finals from unrelated past
+        sessions as if they were consecutive cues in the current one —
+        observed for real: the same sentence from two different container
+        runs (each restarting the same demo audio from 0:00) appeared as
+        two back-to-back, seemingly duplicate cues. `_write_session_vtt`
+        must only see events with ts >= when *this* run() started.
+        """
+        if self._session_started_at is None:
+            return events
+        scoped = []
+        for event in events:
+            try:
+                event_time = datetime.fromisoformat(event["ts"])
+            except (KeyError, TypeError, ValueError):
+                scoped.append(event)  # can't tell which session — keep it
+                continue
+            if event_time >= self._session_started_at:
+                scoped.append(event)
+        return scoped
+
     def _write_session_vtt(self) -> None:
         """Auto-generates a timestamped WebVTT archive of this completed
         session, derived from the same persisted event store the on-demand
         `captions.vtt` endpoint reads (`build_vtt` — no second source of
-        truth). A write failure (e.g. disk full) is logged, not raised —
-        it must never make an otherwise-successful session look failed."""
+        truth, just scoped to this session — see _events_from_this_session).
+        A write failure (e.g. disk full) is logged, not raised — it must
+        never make an otherwise-successful session look failed."""
         if self._vtt_output_dir is None:
             return
         try:
-            events = self._store.read_events(self._config.id)
+            events = self._events_from_this_session(self._store.read_events(self._config.id))
             vtt_content = build_vtt(events)
             path = write_timestamped_vtt_file(
                 self._config.id,

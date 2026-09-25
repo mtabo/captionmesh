@@ -1055,3 +1055,180 @@ async def test_a_replay_style_stage_without_timing_still_writes_a_valid_empty_vt
     assert pipeline.status == "stopped"
     written = next(vtt_dir.glob("*.vtt"))
     assert written.read_text(encoding="utf-8") == "WEBVTT\n"  # valid, just no cues (no timing)
+
+
+# --- Regression tests for the "duplicate consecutive VTT cue" investigation ---
+#
+# Root cause turned out NOT to be a within-session duplicate publish (the
+# guard in _emit_caption already prevents that — confirmed by the tests
+# below, which pass unmodified). It was that the event store is cumulative
+# across container restarts, and _write_session_vtt was reading the whole
+# thing: the same demo audio reprocessed by a later restart produces the
+# same seg_id/text again, and both ended up chained into one VTT timeline
+# as if they were consecutive cues of a single session. See
+# _events_from_this_session in app/stage.py for the fix.
+
+async def test_a_sentence_committed_from_interim_is_not_duplicated_by_the_final(tmp_path):
+    """1) interim completes a sentence -> committed. 2) final repeats that
+    same sentence verbatim. Must produce exactly one caption.final event."""
+    segments = [
+        TranscriptSegment(
+            text="Lanzamos Firebase Studio en Cloud Next este año.",
+            is_final=False, language="es",
+        ),
+        TranscriptSegment(
+            text="Lanzamos Firebase Studio en Cloud Next este año. Y",
+            is_final=False, language="es",
+        ),
+        TranscriptSegment(
+            text="Lanzamos Firebase Studio en Cloud Next este año.",
+            is_final=True, language="es",
+        ),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == ["Lanzamos Firebase Studio en Cloud Next este año."]
+
+
+async def test_a_final_only_emits_sentences_not_already_committed_from_interim(tmp_path):
+    """Final contains two sentences: one already committed via interim, one
+    brand new. Only the new one should be emitted by the final."""
+    segments = [
+        TranscriptSegment(text="First sentence.", is_final=False, language="en"),
+        TranscriptSegment(text="First sentence. Second", is_final=False, language="en"),
+        TranscriptSegment(text="First sentence. Second sentence.", is_final=True, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == ["First sentence.", "Second sentence."]
+    assert len(finals) == len(set(finals))  # nothing repeated
+
+
+async def test_turn_restart_leftover_is_not_duplicated_if_a_later_final_repeats_it(tmp_path):
+    """A turn restarts without a final (its leftover is published, per
+    existing behavior), then a later, unrelated final happens to repeat
+    that same sentence in a *different* turn shortly after — still must
+    not be treated as a duplicate of the restart-published one, since it's
+    a genuinely new turn. (This documents current behavior: the guard is a
+    short recent-window, not a strict single-turn scope.)"""
+    segments = [
+        TranscriptSegment(text="Repeated phrase.", is_final=False, language="en"),
+        # New turn starts without a final for the previous one.
+        TranscriptSegment(text="Something else entirely", is_final=False, language="en"),
+        TranscriptSegment(text="Something else entirely.", is_final=True, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals == ["Repeated phrase.", "Something else entirely."]
+
+
+async def test_a_legitimately_repeated_sentence_well_after_the_recent_window_is_not_suppressed(tmp_path):
+    """A speaker genuinely repeats a phrase later, with enough other
+    captions in between that it's outside the recent-duplicate guard's
+    window — must NOT be silently dropped as a false-positive duplicate."""
+    filler = [
+        TranscriptSegment(text=f"Filler sentence number {i}.", is_final=True, language="en")
+        for i in range(6)  # > the guard's maxlen=5 window
+    ]
+    segments = (
+        [TranscriptSegment(text="Please remember this.", is_final=True, language="en")]
+        + filler
+        + [TranscriptSegment(text="Please remember this.", is_final=True, language="en")]
+    )
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    finals = [e.text for e in broadcaster.published if e.type == "caption.final"]
+    assert finals.count("Please remember this.") == 2  # both legitimately kept
+
+
+async def test_session_vtt_excludes_events_from_earlier_sessions_in_the_same_store(tmp_path):
+    """The real bug: the event store already had a final from an earlier
+    session (same stage_id, same text, old timestamp — e.g. a previous
+    container restart reprocessing the same demo audio). A brand new
+    session's VTT snapshot must NOT include that old entry."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.events import CaptionFinalEvent, EventTiming
+
+    store = JsonlEventStore(base_dir=tmp_path)
+    old_ts = datetime.now(timezone.utc) - timedelta(hours=5)
+    store.append(
+        "main",
+        CaptionFinalEvent(
+            stage_id="main", seg_id="main-000003", text="We launched Firebase Studio at Cloud Next.",
+            language="en", timing=EventTiming(audio_elapsed_ms=36964.0, asr_latency_ms=1320.0),
+            ts=old_ts,
+        ),
+    )
+
+    segments = [TranscriptSegment(
+        text="Brand new session content.", is_final=True, language="en",
+        audio_elapsed_ms=5000.0, asr_latency_ms=100.0,
+    )]
+    broadcaster = RecordingBroadcaster()
+    vtt_dir = tmp_path / "vtt"
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, broadcaster, vtt_output_dir=vtt_dir,
+    )
+
+    await pipeline.run()
+
+    written = next(vtt_dir.glob("*.vtt"))
+    content = written.read_text(encoding="utf-8")
+    assert "Brand new session content." in content
+    assert "We launched Firebase Studio at Cloud Next." not in content
+    assert content.count("-->") == 1  # exactly one cue, not two chained together
+
+
+async def test_two_successive_sessions_produce_vtt_files_scoped_to_each_one(tmp_path):
+    """Same as the earlier "two files" test, but now also asserts on
+    *content*: the second session's VTT must not contain the first
+    session's captions, even though both are stored in the same JSONL."""
+    from datetime import datetime
+
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+
+    segments_1 = [TranscriptSegment(
+        text="First session.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+    )]
+    pipeline_1 = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments_1), store, Broadcaster(),
+        vtt_output_dir=vtt_dir, vtt_timestamp_fn=_fixed_clock(datetime(2026, 9, 25, 18, 0, 0)),
+    )
+    await pipeline_1.run()
+
+    segments_2 = [TranscriptSegment(
+        text="Second session.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+    )]
+    pipeline_2 = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments_2), store, Broadcaster(),
+        vtt_output_dir=vtt_dir, vtt_timestamp_fn=_fixed_clock(datetime(2026, 9, 25, 18, 5, 0)),
+    )
+    await pipeline_2.run()
+
+    first_vtt = (vtt_dir / "main_20260925-180000.vtt").read_text(encoding="utf-8")
+    second_vtt = (vtt_dir / "main_20260925-180500.vtt").read_text(encoding="utf-8")
+    assert "First session." in first_vtt
+    assert "Second session." not in first_vtt
+    assert "Second session." in second_vtt
+    assert "First session." not in second_vtt  # this is the bug that was fixed
