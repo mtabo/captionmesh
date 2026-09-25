@@ -36,3 +36,31 @@ def test_append_scopes_events_by_stage_id(tmp_path):
 
     assert (tmp_path / "a.jsonl").exists()
     assert (tmp_path / "b.jsonl").exists()
+
+
+def test_read_events_returns_events_in_persisted_order(tmp_path):
+    store = JsonlEventStore(base_dir=tmp_path)
+    store.append("main", CaptionFinalEvent(stage_id="main", seg_id="main-000001", text="One.", language="en"))
+    store.append("main", CaptionFinalEvent(stage_id="main", seg_id="main-000002", text="Two.", language="en"))
+
+    events = store.read_events("main")
+
+    assert [e["text"] for e in events] == ["One.", "Two."]
+
+
+def test_read_events_isolates_by_stage_id(tmp_path):
+    store = JsonlEventStore(base_dir=tmp_path)
+    store.append("main", CaptionFinalEvent(stage_id="main", seg_id="main-000001", text="Main.", language="en"))
+    store.append("devroom", CaptionFinalEvent(stage_id="devroom", seg_id="devroom-000001", text="Devroom.", language="es"))
+
+    main_events = store.read_events("main")
+    devroom_events = store.read_events("devroom")
+
+    assert [e["text"] for e in main_events] == ["Main."]
+    assert [e["text"] for e in devroom_events] == ["Devroom."]
+
+
+def test_read_events_returns_empty_list_for_a_stage_with_no_events(tmp_path):
+    store = JsonlEventStore(base_dir=tmp_path)
+
+    assert store.read_events("never-started") == []

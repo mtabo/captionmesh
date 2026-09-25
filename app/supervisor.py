@@ -42,7 +42,7 @@ class StageSupervisor:
         self._conference = conference
         self._api_key = api_key
         self.broadcaster = broadcaster or Broadcaster()
-        self._store = store or JsonlEventStore()
+        self.store = store or JsonlEventStore()
         self._translator = translator or GeminiTranslator(api_key=api_key, model=TRANSLATOR_MODEL)
         self.pipelines: dict[str, StagePipeline] = {}
         self._tasks: list[asyncio.Task] = []
@@ -65,7 +65,7 @@ class StageSupervisor:
         return StagePipeline(
             stage_config,
             transcriber,
-            self._store,
+            self.store,
             self.broadcaster,
             self._translator,
             audio_source=audio_source,

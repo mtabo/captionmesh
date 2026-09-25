@@ -4,11 +4,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, Response
 
 from app.config import load_conference_config
 from app.supervisor import StageSupervisor
+from app.vtt import build_vtt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -55,6 +56,16 @@ async def audience_page(stage_id: str):
 @app.get("/audience")
 async def audience_multi_page():
     return FileResponse(STATIC_DIR / "audience_multi.html")
+
+
+@app.get("/api/stages/{stage_id}/captions.vtt")
+async def stage_captions_vtt(stage_id: str):
+    pipelines = supervisor.pipelines if supervisor else {}
+    if stage_id not in pipelines:
+        raise HTTPException(status_code=404, detail="unknown stage")
+
+    events = supervisor.store.read_events(stage_id)
+    return Response(content=build_vtt(events), media_type="text/vtt")
 
 
 @app.websocket("/ws/audience/{stage_id}")

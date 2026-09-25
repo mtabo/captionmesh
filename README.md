@@ -4,6 +4,34 @@ CaptionMesh is an open-source real-time conference captioning and translation
 system, built during the Nerdearla Vibeathon 2026. See `docs/spec.md` for the
 full architecture and `CLAUDE.md` for development rules.
 
+## WebVTT Export
+
+`GET /api/stages/{stage_id}/captions.vtt` (`app/vtt.py`) builds a WebVTT
+document from a stage's persisted finalized captions —
+`supervisor.store.read_events(stage_id)` (new method on the existing
+`JsonlEventStore`, not a new storage abstraction) → `build_vtt(events)`.
+404 for an unconfigured `stage_id`; 200 with a valid, empty (`WEBVTT\n`)
+document for a configured stage with no finals yet.
+
+- Only `caption.final` events produce cues — interim is never persisted, so
+  it never reaches this path.
+- When a `caption.translation` exists for a `seg_id`, its text is preferred
+  over the original (MVP choice: an EN→ES stage's VTT shows Spanish).
+  Falls back to the original final's text when no translation exists.
+- **Cue timestamps always come from the original final's `timing`, never
+  from the translation** — confirmed by inspection: `StagePipeline._translate_one`
+  never sets `timing` on a `CaptionTranslationEvent`, so it is always `None`.
+  A translation can substitute a cue's text but never its timing.
+- A cue's END is its final's `timing.audio_elapsed_ms`; its START is the
+  previous cue's END (0 for the first) — the closest boundary this event
+  model actually has, since only finals are persisted (no true per-utterance
+  start is recorded). Documented approximation, not measured data.
+- **A final with no `timing` is skipped, never given a fabricated
+  timestamp.** This means stages sourced from `ReplayTranscriber` (which
+  does not supply timing) currently export a valid but *empty* VTT even
+  when they have finals — confirmed directly against a real run. Only
+  `file`-sourced (real Gemini) stages produce populated VTT today.
+
 ## Multi-Stage Support
 
 `StageSupervisor` (`app/supervisor.py`) creates and runs one independent
