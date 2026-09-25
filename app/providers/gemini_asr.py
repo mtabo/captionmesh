@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Callable, Optional
 
 from google import genai
 from google.genai import types
@@ -12,6 +12,7 @@ DEFAULT_MODEL = "gemini-3.5-transcribe-live"
 DEFAULT_MODE = "SMART"
 RECEIVE_GRACE_SECONDS = 15
 BYTES_PER_MS = SAMPLE_RATE * SAMPLE_WIDTH_BYTES / 1000
+DRIFT_SAMPLE_INTERVAL_MS = 1000
 
 
 class GeminiTranscriber:
@@ -23,13 +24,20 @@ class GeminiTranscriber:
         language: str = "auto",
         model: str = DEFAULT_MODEL,
         mode: str = DEFAULT_MODE,
+        on_send_sample: Optional[Callable[[float, float], None]] = None,
     ) -> None:
+        """`on_send_sample`, if given, is called roughly every second of audio
+        content sent with (audio_elapsed_ms, wall_elapsed_ms) — diagnostic
+        only, unused by default and not wired into production call sites.
+        """
         self._api_key = api_key
         self._language = language
         self._model = model
         self._mode = mode
+        self._on_send_sample = on_send_sample
         self._stream_started_at: Optional[float] = None
         self._audio_elapsed_ms: float = 0.0
+        self._last_sampled_audio_ms: float = 0.0
 
     async def transcribe(self, audio_chunks: AsyncIterator[bytes]) -> AsyncIterator[TranscriptSegment]:
         client = genai.Client(api_key=self._api_key)
@@ -124,4 +132,13 @@ class GeminiTranscriber:
                 audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={SAMPLE_RATE}")
             )
             self._audio_elapsed_ms += len(chunk) / BYTES_PER_MS
+
+            if (
+                self._on_send_sample is not None
+                and self._audio_elapsed_ms - self._last_sampled_audio_ms >= DRIFT_SAMPLE_INTERVAL_MS
+            ):
+                self._last_sampled_audio_ms = self._audio_elapsed_ms
+                wall_elapsed_ms = (time.monotonic() - self._stream_started_at) * 1000
+                self._on_send_sample(self._audio_elapsed_ms, wall_elapsed_ms)
+
         await session.send_realtime_input(audio_stream_end=True)

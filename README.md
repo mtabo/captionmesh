@@ -86,6 +86,14 @@ this local dev setup but not for a real remote audience client.
 `FileAudioSource` accepts an optional `chunk_ms` (default unchanged at 100ms)
 used only for the chunk-size experiment; it is not exposed through stage
 config.
+
+`FileAudioSource` paces sends with absolute wall-clock deadlines
+(`pacing="deadline"`, the production default), not repeated fixed-duration
+sleeps. Measured against the real Gemini Live API, the old fixed-sleep
+approach (`pacing="naive"`, kept only for comparison/tests) accumulated
+~18ms of drift per second of audio (~1.2s after 67s) because it never
+accounted for time spent elsewhere in the send loop; deadline-based pacing
+holds drift flat instead.
 - `StagePipeline` has no dependency on FastAPI or WebSockets; it only calls
   `Broadcaster.publish(event)`, so the transport is fully swappable.
 
