@@ -2,7 +2,7 @@
 
 ## Project
 
-CaptionMesh is an open-source real-time conference captioning system being developed during the Nerdearla Vibeathon 2026.
+CaptionMesh is an open-source real-time conference captioning and translation system being developed during the Nerdearla Vibeathon 2026.
 
 The priority is to deliver a working, demonstrable MVP before adding architectural complexity.
 
@@ -18,46 +18,172 @@ Optimize for:
 4. Simplicity.
 5. Demonstrability.
 
+**Boundaries yes, ceremony no.**
+
+Every abstraction must have a concrete reason to exist.
+
 Do not optimize for hypothetical future scale before the MVP works.
 
 ## Architecture
 
-The MVP is a single FastAPI process containing independent stage pipelines:
+CaptionMesh is a modular monolith.
+
+All MVP components run in one FastAPI process.
+
+The primary runtime concept is a conference `Stage`.
+
+```text
+StageSupervisor
+      │
+      ├── StagePipeline
+      │
+      ├── StagePipeline
+      │
+      └── StagePipeline
+```
+
+Each StagePipeline coordinates:
 
 ```text
 Source
   ↓
-Audio Queue
+Transcription
   ↓
-Transcriber
+Translation
   ↓
-Translator
+Events
   ↓
-Broadcaster
+Broadcast / Store
 ```
 
-Each stage has independent state and failure handling.
+Each stage is independently supervised.
 
-Do not introduce microservices unless explicitly requested.
+A failure in one stage must not terminate other stages.
 
-## Forbidden Complexity for P0
+## Project Structure
 
-Do NOT introduce:
+Prefer this initial structure:
 
-- Redis
-- Kafka
-- RabbitMQ
-- Celery
-- Kubernetes
-- PostgreSQL
-- distributed workers
-- service mesh
-- React
-- complex frontend build systems
-- authentication systems
-- multi-instance orchestration
+```text
+app/
+├── config.py
+├── events.py
+├── stage.py
+├── providers/
+│   ├── gemini_asr.py
+│   ├── gemini_translate.py
+│   └── replay.py
+├── sources/
+│   ├── ffmpeg.py
+│   └── web.py
+├── broadcast.py
+├── store.py
+└── api.py
+```
 
-unless the user explicitly requests them.
+Keep the structure small.
+
+Do not create separate `domain`, `application`, `infrastructure`, and `interfaces` layers merely for architectural appearance.
+
+## Configuration
+
+Conference stages are configuration-driven.
+
+Adding a stage should not require application-code changes.
+
+Example:
+
+```yaml
+stages:
+  - id: main
+    name: Main Stage
+    language: auto
+    targets:
+      - es
+    source:
+      type: file
+      path: /data/audio/main.wav
+```
+
+`language` describes the source language.
+
+Default:
+
+```text
+auto
+```
+
+The application must not assume that the transcription provider automatically supplies a reliable language code.
+
+`targets` defines the languages to generate.
+
+A target equal to the source language does not require translation.
+
+The architecture must support both:
+
+```text
+EN → ES
+ES → EN
+```
+
+and future multi-language output.
+
+## Providers
+
+Use small `typing.Protocol` interfaces for external capabilities.
+
+### TranscriptionProvider
+
+P0 implementations:
+
+```text
+GeminiTranscriber
+ReplayTranscriber
+```
+
+### TranslationProvider
+
+P0 implementation:
+
+```text
+GeminiTranslator
+```
+
+Gemini is an infrastructure adapter, not the conceptual center of CaptionMesh.
+
+Do not hard-code Gemini assumptions into domain/runtime objects when a provider boundary is sufficient.
+
+### ReplayTranscriber
+
+Replay is a real provider, not a fake placeholder.
+
+It should replay recorded transcript events according to their timing.
+
+Use it to:
+
+- test downstream processing
+- develop without API calls
+- reproduce scenarios
+- run multiple stages without multiplying Gemini sessions
+- demonstrate scaling
+
+## Anti-Ceremony Rules
+
+Do NOT introduce the following without a concrete demonstrated need:
+
+- dependency injection containers
+- repository pattern
+- Unit of Work
+- generic EventBus
+- service locator
+- factory hierarchies
+- abstract base class hierarchies
+- domain event frameworks
+- generic workflow engines
+- ORM/database layer
+- microservices
+
+`typing.Protocol`, dataclasses, Pydantic models, asyncio queues, and small compositional classes are encouraged where they simplify the implementation.
 
 ## Gemini
 
@@ -67,7 +193,7 @@ The transcription model is:
 gemini-3.5-transcribe-live
 ```
 
-The canonical audio format is:
+Canonical audio format:
 
 ```text
 PCM 16-bit
@@ -81,19 +207,29 @@ Use the Google GenAI Python SDK.
 The transcription pipeline must distinguish:
 
 - interim transcription
-- final transcription
+- finalized transcription
 
-Final transcription segments are the input to translation.
+Finalized segments are inputs to translation.
 
 Do not translate every interim transcript.
 
 ## Segment Identity
 
-Every finalized transcript must receive a stable `seg_id`.
+Every finalized transcript receives a stable `seg_id`.
 
-Original transcript and translation are separate events correlated through `seg_id`.
+Original and translated captions are separate events correlated through `seg_id`.
 
-Never rely on frontend text matching to associate translations with transcripts.
+Never make the frontend match transcript text to associate translations.
+
+## Events
+
+Events are an explicit internal contract.
+
+Keep event types small and typed.
+
+A stage may use an asyncio queue or equivalent mechanism for internal event flow.
+
+Do not create a generic EventBus abstraction.
 
 ## Realtime Behavior
 
@@ -101,21 +237,21 @@ Latency matters.
 
 Use bounded queues.
 
-Never allow an unbounded backlog of audio.
+Never allow an unbounded audio backlog.
 
-If the system falls behind, prefer dropping stale audio over creating an ever-growing latency buffer.
+If the system falls behind, prefer dropping stale audio over creating ever-growing latency.
 
 ## Session Lifecycle
 
 Gemini Live Transcription sessions have a finite continuous streaming duration.
 
-Implement reconnect/rotation explicitly.
+Implement explicit reconnect/rotation.
 
-Do not assume a transcription session can remain open indefinitely.
+Do not assume that a transcription session can remain open indefinitely.
 
-Session lifecycle must be isolated per stage.
+Session lifecycle is isolated per stage.
 
-A session failure in Stage A must not terminate Stage B.
+A failure in Stage A must not terminate Stage B.
 
 ## Audio
 
@@ -123,13 +259,13 @@ P0 uses file/stream input.
 
 Use ffmpeg for normalization.
 
-Canonical internal format:
+Canonical format:
 
 ```text
 PCM 16-bit / 16 kHz / mono / little-endian
 ```
 
-Browser microphone support is optional P1.
+Browser microphone support is P1.
 
 Do not spend P0 time building AudioWorklet infrastructure unless explicitly requested.
 
@@ -137,15 +273,15 @@ Do not spend P0 time building AudioWorklet infrastructure unless explicitly requ
 
 Translate finalized transcript segments.
 
-Translation must be implemented behind an internal interface.
+Translation must be implemented behind a small provider interface.
 
-Keep the implementation replaceable.
+Translate only to configured `targets`.
+
+Do not build a translation orchestration framework.
 
 ## Frontend
 
 Keep the audience UI simple.
-
-Avoid unnecessary frontend frameworks.
 
 The UI must prioritize:
 
@@ -155,50 +291,64 @@ The UI must prioritize:
 - stage identification
 - connection status
 
+Avoid complex frontend frameworks unless they provide a concrete time-saving benefit.
+
 ## Persistence
 
 No database is required for P0.
 
-JSONL is sufficient for stage event persistence and debugging.
+JSONL is sufficient for stage events and debugging.
 
-## Configuration
-
-Keep configuration explicit and simple.
-
-Prefer environment variables for secrets.
-
-Never commit API keys.
+VTT generation should consume persisted/events data rather than become part of the transcription pipeline.
 
 ## Testing
 
-Every new component should have the smallest useful test.
+Prioritize useful integration tests.
 
-Prioritize integration tests for:
+Important test areas:
 
 - audio normalization
-- transcription event parsing
+- event parsing
 - segment IDs
 - translation correlation
 - stage isolation
+- replay provider
+- stage lifecycle
+
+Replay should be used wherever deterministic downstream tests are useful.
 
 Do not spend excessive time building a large test suite during the hackathon.
 
 ## Development Workflow
 
-Work incrementally.
+Implement incrementally:
+
+```text
+implement
+    ↓
+run
+    ↓
+observe
+    ↓
+fix
+    ↓
+commit
+```
 
 Preferred order:
 
 1. Gemini transcription spike.
 2. One stage end-to-end.
 3. Translation.
-4. Audience UI.
+4. Audience WebSocket/UI.
 5. Two stages.
-6. Reconnect.
-7. Documentation.
-8. Optional features.
+6. Replay provider.
+7. Reconnect.
+8. Documentation.
+9. Optional features.
+10. Demo.
 
-After each milestone, run the application and verify actual behavior.
+Do not build the entire architecture before validating the first realtime path.
 
 ## Git
 
@@ -212,19 +362,25 @@ feat: add stage pipeline
 feat: add translation pipeline
 feat: add audience websocket
 feat: support concurrent stages
+feat: add replay transcription provider
 fix: reconnect transcription session
 docs: document deployment
 ```
 
-Do not make large unrelated commits.
+Avoid unrelated changes in the same commit.
 
 ## Scope Control
 
-If a proposed feature is not required for the MVP, classify it as P1/P2 before implementing it.
+If a proposed feature is not required for P0, classify it as P1/P2 before implementing it.
 
 When uncertain, choose the simpler implementation that satisfies the acceptance criteria.
 
-Do not redesign the architecture without evidence from an actual requirement or implementation problem.
+Do not redesign the architecture without evidence from:
+
+- an actual requirement
+- a failing test
+- an implementation constraint
+- an observed operational problem
 
 ## Hackathon Constraint
 

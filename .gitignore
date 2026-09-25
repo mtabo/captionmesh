@@ -1,0 +1,82 @@
+# ─────────────────────────────────────
+# Python
+# ─────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ─────────────────────────────────────
+# Environment / secrets
+# ─────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# Credentials / keys
+*.pem
+*.key
+*.crt
+credentials.json
+service-account*.json
+
+# ─────────────────────────────────────
+# Runtime data
+# ─────────────────────────────────────
+data/audio/*
+data/stages/*
+data/runtime/*
+data/tmp/*
+
+# Keep directory structure
+!data/audio/.gitkeep
+!data/stages/.gitkeep
+!data/runtime/.gitkeep
+!data/tmp/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# ─────────────────────────────────────
+# Local development
+# ─────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+
+# Claude / local AI tooling
+.claude/
+
+# ─────────────────────────────────────
+# Node (if frontend tooling is introduced)
+# ─────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ─────────────────────────────────────
+# Docker
+# ─────────────────────────────────────
+docker-data/
