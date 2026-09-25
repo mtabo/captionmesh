@@ -50,6 +50,7 @@ async def health():
     return {
         "status": "ok",
         "stages": {stage_id: pipeline.status for stage_id, pipeline in pipelines.items()},
+        "latency": {stage_id: pipeline.stats.summary() for stage_id, pipeline in pipelines.items()},
     }
 
 

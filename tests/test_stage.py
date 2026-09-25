@@ -170,3 +170,58 @@ async def test_a_failing_transcriber_is_isolated_as_error_status(tmp_path):
     await pipeline.run()  # must not raise
 
     assert pipeline.status == "error"
+
+
+async def test_timing_is_propagated_from_segment_to_event_and_persisted(tmp_path):
+    segments = [
+        TranscriptSegment(text="final.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=250.0)
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    published = broadcaster.published[0]
+    assert published.timing.audio_elapsed_ms == 1000.0
+    assert published.timing.asr_latency_ms == 250.0
+
+    persisted = json.loads((tmp_path / "main.jsonl").read_text().splitlines()[0])
+    assert persisted["timing"] == {"audio_elapsed_ms": 1000.0, "asr_latency_ms": 250.0}
+
+
+async def test_missing_timing_from_provider_yields_no_timing_and_is_not_recorded(tmp_path):
+    segments = [TranscriptSegment(text="final.", is_final=True, language="en")]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()  # must not raise
+
+    assert broadcaster.published[0].timing is None
+    persisted = json.loads((tmp_path / "main.jsonl").read_text().splitlines()[0])
+    assert persisted["timing"] is None
+    assert pipeline.stats.final.summary().count == 0
+
+
+async def test_latency_stats_aggregate_across_interim_and_final_events(tmp_path):
+    segments = [
+        TranscriptSegment(text="a", is_final=False, audio_elapsed_ms=0.0, asr_latency_ms=100.0),
+        TranscriptSegment(text="ab", is_final=False, audio_elapsed_ms=100.0, asr_latency_ms=300.0),
+        TranscriptSegment(text="ab.", is_final=True, language="en", audio_elapsed_ms=200.0, asr_latency_ms=500.0),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, Broadcaster())
+
+    await pipeline.run()
+
+    interim_summary = pipeline.stats.interim.summary()
+    assert interim_summary.count == 2
+    assert interim_summary.first_ms == 100.0
+    assert interim_summary.min_ms == 100.0
+    assert interim_summary.max_ms == 300.0
+    assert interim_summary.avg_ms == 200.0
+
+    final_summary = pipeline.stats.final.summary()
+    assert final_summary.count == 1
+    assert final_summary.first_ms == final_summary.min_ms == final_summary.max_ms == 500.0

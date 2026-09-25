@@ -1,15 +1,17 @@
 import asyncio
-from typing import AsyncIterator
+import time
+from typing import AsyncIterator, Optional
 
 from google import genai
 from google.genai import types
 
 from app.providers import TranscriptSegment
-from app.sources.ffmpeg import SAMPLE_RATE
+from app.sources.ffmpeg import SAMPLE_RATE, SAMPLE_WIDTH_BYTES
 
 DEFAULT_MODEL = "gemini-3.5-transcribe-live"
 DEFAULT_MODE = "SMART"
 RECEIVE_GRACE_SECONDS = 15
+BYTES_PER_MS = SAMPLE_RATE * SAMPLE_WIDTH_BYTES / 1000
 
 
 class GeminiTranscriber:
@@ -26,6 +28,8 @@ class GeminiTranscriber:
         self._language = language
         self._model = model
         self._mode = mode
+        self._stream_started_at: Optional[float] = None
+        self._audio_elapsed_ms: float = 0.0
 
     async def transcribe(self, audio_chunks: AsyncIterator[bytes]) -> AsyncIterator[TranscriptSegment]:
         client = genai.Client(api_key=self._api_key)
@@ -57,10 +61,16 @@ class GeminiTranscriber:
                     if content is None:
                         continue
 
+                    audio_elapsed_ms, asr_latency_ms = self._current_timing()
+
                     interim = content.interim_input_transcription
                     if interim is not None and interim.text:
                         yield TranscriptSegment(
-                            text=interim.text, is_final=False, language=interim.language_code
+                            text=interim.text,
+                            is_final=False,
+                            language=interim.language_code,
+                            audio_elapsed_ms=audio_elapsed_ms,
+                            asr_latency_ms=asr_latency_ms,
                         )
 
                     final = content.input_transcription
@@ -70,11 +80,19 @@ class GeminiTranscriber:
                         # streamed through this field (observed in the spike).
                         if final.finished is False:
                             yield TranscriptSegment(
-                                text=final.text, is_final=False, language=final.language_code
+                                text=final.text,
+                                is_final=False,
+                                language=final.language_code,
+                                audio_elapsed_ms=audio_elapsed_ms,
+                                asr_latency_ms=asr_latency_ms,
                             )
                         else:
                             yield TranscriptSegment(
-                                text=final.text, is_final=True, language=final.language_code
+                                text=final.text,
+                                is_final=True,
+                                language=final.language_code,
+                                audio_elapsed_ms=audio_elapsed_ms,
+                                asr_latency_ms=asr_latency_ms,
                             )
 
                     if content.turn_complete:
@@ -87,10 +105,23 @@ class GeminiTranscriber:
                 except asyncio.CancelledError:
                     pass
 
-    @staticmethod
-    async def _send_audio(session, audio_chunks: AsyncIterator[bytes]) -> None:
+    def _current_timing(self) -> tuple[Optional[float], Optional[float]]:
+        """Snapshot of (audio_elapsed_ms, asr_latency_ms) at the moment of a receive.
+
+        asr_latency_ms is how far the wall clock has moved past the amount of
+        audio content already sent — i.e. how far behind real time this
+        transcript event arrived. None before any audio has been sent.
+        """
+        if self._stream_started_at is None:
+            return None, None
+        wall_elapsed_ms = (time.monotonic() - self._stream_started_at) * 1000
+        return self._audio_elapsed_ms, wall_elapsed_ms - self._audio_elapsed_ms
+
+    async def _send_audio(self, session, audio_chunks: AsyncIterator[bytes]) -> None:
+        self._stream_started_at = time.monotonic()
         async for chunk in audio_chunks:
             await session.send_realtime_input(
                 audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={SAMPLE_RATE}")
             )
+            self._audio_elapsed_ms += len(chunk) / BYTES_PER_MS
         await session.send_realtime_input(audio_stream_end=True)

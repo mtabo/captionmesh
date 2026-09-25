@@ -1,11 +1,14 @@
 import logging
+import time
 from pathlib import Path
+from typing import Optional
 
 from app.broadcast import Broadcaster
 from app.config import StageConfig
-from app.events import CaptionFinalEvent, CaptionInterimEvent
-from app.providers import TranscriptionProvider
+from app.events import CaptionFinalEvent, CaptionInterimEvent, EventTiming
+from app.providers import TranscriptionProvider, TranscriptSegment
 from app.sources.ffmpeg import FileAudioSource
+from app.stats import StageLatencyStats
 from app.store import JsonlEventStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,7 @@ class StagePipeline:
         self._seg_counter = 0
         self._current_seg_id: str | None = None
         self.status = "created"
+        self.stats = StageLatencyStats()
 
     async def run(self) -> None:
         self.status = "running"
@@ -51,7 +55,7 @@ class StagePipeline:
             self.status = "error"
             logger.exception("Stage %s failed", self._config.id)
 
-    def _resolve_language(self, segment) -> str:
+    def _resolve_language(self, segment: TranscriptSegment) -> str:
         return segment.language or (
             self._config.language if self._config.language != "auto" else "und"
         )
@@ -62,24 +66,47 @@ class StagePipeline:
             self._current_seg_id = f"{self._config.id}-{self._seg_counter:06d}"
         return self._current_seg_id
 
-    def _handle_interim(self, segment) -> None:
+    @staticmethod
+    def _build_timing(segment: TranscriptSegment) -> Optional[EventTiming]:
+        if segment.audio_elapsed_ms is None or segment.asr_latency_ms is None:
+            return None
+        return EventTiming(
+            audio_elapsed_ms=segment.audio_elapsed_ms,
+            asr_latency_ms=segment.asr_latency_ms,
+        )
+
+    def _publish(self, event) -> None:
+        t0 = time.monotonic()
+        self._broadcaster.publish(event)
+        broadcast_latency_ms = (time.monotonic() - t0) * 1000
+        logger.debug("[%s] broadcast latency: %.3fms", self._config.id, broadcast_latency_ms)
+
+    def _handle_interim(self, segment: TranscriptSegment) -> None:
+        timing = self._build_timing(segment)
         event = CaptionInterimEvent(
             stage_id=self._config.id,
             seg_id=self._open_seg_id(),
             text=segment.text,
             language=self._resolve_language(segment),
+            timing=timing,
         )
-        self._broadcaster.publish(event)
+        self._publish(event)
+        if timing is not None:
+            self.stats.record_interim(timing.asr_latency_ms)
         logger.info("[%s][INTERIM] %s", self._config.id, segment.text)
 
-    def _handle_final(self, segment) -> None:
+    def _handle_final(self, segment: TranscriptSegment) -> None:
+        timing = self._build_timing(segment)
         event = CaptionFinalEvent(
             stage_id=self._config.id,
             seg_id=self._open_seg_id(),
             text=segment.text,
             language=self._resolve_language(segment),
+            timing=timing,
         )
         self._store.append(self._config.id, event)
-        self._broadcaster.publish(event)
+        self._publish(event)
+        if timing is not None:
+            self.stats.record_final(timing.asr_latency_ms)
         logger.info("[%s][FINAL] %s", self._config.id, segment.text)
         self._current_seg_id = None

@@ -11,11 +11,17 @@ CHUNK_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * CHANNELS * CHUNK_MS / 1000)
 
 
 class FileAudioSource:
-    """Decodes a local audio file into canonical PCM chunks, paced at real time."""
+    """Decodes a local audio file into canonical PCM chunks, paced at real time.
 
-    def __init__(self, path: Path, realtime: bool = True) -> None:
+    `chunk_ms` is configurable (used for the chunk-size latency experiment)
+    but defaults to the production value; it is not exposed via stage config.
+    """
+
+    def __init__(self, path: Path, realtime: bool = True, chunk_ms: int = CHUNK_MS) -> None:
         self._path = path
         self._realtime = realtime
+        self._chunk_ms = chunk_ms
+        self._chunk_bytes = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * CHANNELS * chunk_ms / 1000)
 
     async def stream(self) -> AsyncIterator[bytes]:
         if not self._path.exists():
@@ -39,12 +45,12 @@ class FileAudioSource:
         assert process.stdout is not None
         try:
             while True:
-                chunk = await process.stdout.read(CHUNK_BYTES)
+                chunk = await process.stdout.read(self._chunk_bytes)
                 if not chunk:
                     break
                 yield chunk
                 if self._realtime:
-                    await asyncio.sleep(CHUNK_MS / 1000)
+                    await asyncio.sleep(self._chunk_ms / 1000)
         finally:
             stderr = await process.stderr.read()
             returncode = await process.wait()

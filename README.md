@@ -63,6 +63,29 @@ read-only WebSocket fed by an in-memory `Broadcaster` (`app/broadcast.py`).
   not buffer events for clients that join late, and per-subscriber queues
   are bounded (oldest event dropped under backpressure) so a slow client
   cannot grow an unbounded backlog.
+
+### Latency instrumentation
+
+Every event carries an optional `timing` object (`{audio_elapsed_ms,
+asr_latency_ms}`), `None` when a provider can't supply it:
+
+- `audio_elapsed_ms` — elapsed *source-relative* audio content sent to
+  Gemini so far. Not a wall-clock capture timestamp (the P0 source is a
+  prerecorded file, not a live mic).
+- `asr_latency_ms` — how far behind that audio timeline this transcript
+  arrived: `(wall-clock elapsed since streaming started) - audio_elapsed_ms`.
+  Computed in `GeminiTranscriber` from actual bytes sent per chunk, so it
+  stays correct regardless of chunk size.
+
+`GET /health` includes a `latency` object per stage with count/first/min/avg/max
+for interim and final events separately (`app/stats.py`). The audience page
+shows a small dev-only indicator (`LIVE · ASR 1.4s · delivery(same-host) 2ms`);
+the delivery number assumes server and browser share a clock, which holds for
+this local dev setup but not for a real remote audience client.
+
+`FileAudioSource` accepts an optional `chunk_ms` (default unchanged at 100ms)
+used only for the chunk-size experiment; it is not exposed through stage
+config.
 - `StagePipeline` has no dependency on FastAPI or WebSockets; it only calls
   `Broadcaster.publish(event)`, so the transport is fully swappable.
 

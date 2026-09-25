@@ -57,6 +57,12 @@
     color: #c7cad1;
     font-size: 17px;
   }
+  #dev-metrics {
+    margin-top: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: #5b606b;
+  }
 </style>
 </head>
 <body>
@@ -67,6 +73,7 @@
 </header>
 <main>
   <div id="live"></div>
+  <div id="dev-metrics"></div>
   <div id="history"></div>
 </main>
 <script>
@@ -76,6 +83,7 @@
   const historyEl = document.getElementById("history");
   const wsBadge = document.getElementById("ws-badge");
   const stageBadge = document.getElementById("stage-badge");
+  const devMetricsEl = document.getElementById("dev-metrics");
   const HISTORY_LIMIT = 20;
 
   let currentSegId = null;
@@ -106,6 +114,20 @@
       .catch(() => setStageBadge("unknown"));
   }
 
+  function updateDevMetrics(data) {
+    const parts = [data.type === "caption.final" ? "FINAL" : "LIVE"];
+    if (data.timing) {
+      parts.push(`ASR ${(data.timing.asr_latency_ms / 1000).toFixed(1)}s`);
+    }
+    // Delivery latency assumes server and browser share a clock (true for
+    // this same-host dev setup); not valid across machines with clock skew.
+    const deliveryMs = Date.now() - new Date(data.ts).getTime();
+    if (Number.isFinite(deliveryMs)) {
+      parts.push(`delivery(same-host) ${deliveryMs}ms`);
+    }
+    devMetricsEl.textContent = parts.join(" · ");
+  }
+
   function connect() {
     setWsBadge("connecting");
     const protocol = location.protocol === "https:" ? "wss" : "ws";
@@ -125,6 +147,7 @@
         }
         addToHistory(data.text);
       }
+      updateDevMetrics(data);
     };
 
     ws.onclose = () => {
