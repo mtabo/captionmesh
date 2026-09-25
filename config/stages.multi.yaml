@@ -1,0 +1,21 @@
+conference:
+  name: Nerdearla 2026
+
+stages:
+  - id: main
+    name: Main Stage
+    language: en
+    targets:
+      - es
+    source:
+      type: replay
+      path: data/replay/main.json
+
+  - id: devroom
+    name: Dev Room
+    language: es
+    targets:
+      - en
+    source:
+      type: replay
+      path: data/replay/devroom.json

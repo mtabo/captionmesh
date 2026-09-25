@@ -4,6 +4,46 @@ CaptionMesh is an open-source real-time conference captioning and translation
 system, built during the Nerdearla Vibeathon 2026. See `docs/spec.md` for the
 full architecture and `CLAUDE.md` for development rules.
 
+## Multi-Stage Support
+
+`StageSupervisor` (`app/supervisor.py`) creates and runs one independent
+`StagePipeline` per configured stage, each as its own `asyncio.Task`. Every
+pipeline has fully independent state — source, transcriber, `seg_id`
+sequence, pending translation tasks, stats, lifecycle status — a slow or
+failing stage cannot block another. `Broadcaster` and `JsonlEventStore` are
+shared instances but were already keyed by `stage_id` internally, so sharing
+them creates no cross-stage coupling; each `/ws/audience/{stage_id}` client
+only ever receives that stage's events.
+
+Two source types are supported per stage, selected by `source.type`:
+
+- `file` — the existing `GeminiTranscriber` + `FileAudioSource` (real Gemini
+  Live Transcription).
+- `replay` — `ReplayTranscriber` (`app/providers/replay.py`), a real
+  provider (not a mock) that replays a recorded transcript from a JSON
+  fixture with its original timing, ignoring the audio input entirely. Used
+  for quota-free, deterministic development and demos — see
+  `data/replay/*.json` and `config/stages.multi.yaml`.
+
+Run a two-stage demo (no Gemini ASR quota consumed — translation still uses
+the real API, per-stage, ~2 calls each):
+
+```bash
+docker compose run -d --rm -p 8000:8000 -e CAPTIONMESH_CONFIG=config/stages.multi.yaml app
+```
+
+Then open `http://localhost:8000/audience` (no `stage_id` — this route
+auto-discovers every configured stage from `/health` and renders one panel
+per stage side by side; the existing single-stage `/audience/{stage_id}`
+page is unchanged).
+
+**Known limitation:** the shutdown grace period (5s, see below) is fixed
+regardless of how short a stage's content is. A very short replay stage
+(a few seconds) can outrun a real translation call that happens to take
+longer than 5s, cancelling it — observed directly in testing. This is the
+same disclosed trade-off as before, just more visible on short demo content
+than on a multi-minute real talk.
+
 ## Running the App (single stage)
 
 The real `StagePipeline` runs inside the FastAPI process defined in `app/api.py`.

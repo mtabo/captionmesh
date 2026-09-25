@@ -1,24 +1,31 @@
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import Optional
 
 from app.broadcast import Broadcaster
 from app.config import StageConfig
 from app.events import CaptionFinalEvent, CaptionInterimEvent, CaptionTranslationEvent, EventTiming
 from app.providers import TranscriptionProvider, TranscriptSegment, TranslationProvider
-from app.sources.ffmpeg import FileAudioSource
+from app.sources import AudioSource
 from app.stats import StageLatencyStats
 from app.store import JsonlEventStore
 
 logger = logging.getLogger(__name__)
+
 
 # Bounded grace window, mirroring the existing RECEIVE_GRACE_SECONDS idiom in
 # GeminiTranscriber: once the main transcription loop ends, give pending
 # translation tasks a short window to finish rather than dropping them
 # instantly, but never block shutdown indefinitely for a slow/hung call.
 TRANSLATION_SHUTDOWN_GRACE_SECONDS = 5
+
+
+async def _empty_audio_stream():
+    """No real audio (e.g. a replay-driven stage, which generates its own
+    timeline). An async generator that yields nothing."""
+    return
+    yield  # pragma: no cover - unreachable; makes this a generator function
 
 
 class StagePipeline:
@@ -47,6 +54,7 @@ class StagePipeline:
         broadcaster: Broadcaster,
         translator: Optional[TranslationProvider] = None,
         translation_shutdown_grace_seconds: float = TRANSLATION_SHUTDOWN_GRACE_SECONDS,
+        audio_source: Optional[AudioSource] = None,
     ) -> None:
         self._config = config
         self._transcriber = transcriber
@@ -54,6 +62,7 @@ class StagePipeline:
         self._broadcaster = broadcaster
         self._translator = translator
         self._translation_shutdown_grace_seconds = translation_shutdown_grace_seconds
+        self._audio_source = audio_source
         self._seg_counter = 0
         self._current_seg_id: str | None = None
         self.status = "created"
@@ -67,8 +76,10 @@ class StagePipeline:
     async def run(self) -> None:
         self.status = "running"
         try:
-            source = FileAudioSource(Path(self._config.source.path))
-            async for segment in self._transcriber.transcribe(source.stream()):
+            audio_chunks = (
+                self._audio_source.stream() if self._audio_source is not None else _empty_audio_stream()
+            )
+            async for segment in self._transcriber.transcribe(audio_chunks):
                 if segment.is_final:
                     self._handle_final(segment)
                 else:

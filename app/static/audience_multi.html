@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CaptionMesh — All Stages</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: #0b0d12;
+    color: #f2f3f5;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #23262e;
+    font-size: 14px;
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  .badge {
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: #23262e;
+    margin-right: 6px;
+  }
+  .badge.ok { background: #14532d; }
+  .badge.warn { background: #713f12; }
+  .badge.err { background: #7f1d1d; }
+  #stages {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 20px;
+    padding: 20px;
+  }
+  .panel {
+    border: 1px solid #23262e;
+    border-radius: 10px;
+    padding: 16px;
+    background: #0f1116;
+  }
+  .panel h2 {
+    margin: 0 0 10px 0;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .live {
+    min-height: 3em;
+    font-size: 20px;
+    line-height: 1.4;
+    padding: 14px;
+    border-radius: 8px;
+    background: #14161c;
+    border: 1px solid #23262e;
+  }
+  .live:empty::before { content: "…"; color: #5b606b; }
+  .history { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .history p {
+    margin: 0;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: #14161c;
+    color: #c7cad1;
+    font-size: 15px;
+  }
+  .translation { color: #8ab4f8; font-style: italic; margin-top: 4px; }
+  .dev-metrics {
+    margin-top: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: #5b606b;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>CaptionMesh — All Stages</h1>
+</header>
+<div id="stages"></div>
+<script>
+(function () {
+  const HISTORY_LIMIT = 10;
+  const stagesEl = document.getElementById("stages");
+  const panels = {};
+
+  function createPanel(stageId) {
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    panel.innerHTML = `
+      <h2>${stageId}
+        <span class="badge" data-role="stage-badge">stage: …</span>
+        <span class="badge" data-role="ws-badge">connection: …</span>
+      </h2>
+      <div class="live" data-role="live"></div>
+      <div class="dev-metrics" data-role="dev-metrics"></div>
+      <div class="history" data-role="history"></div>
+    `;
+    stagesEl.appendChild(panel);
+    return {
+      liveEl: panel.querySelector('[data-role="live"]'),
+      historyEl: panel.querySelector('[data-role="history"]'),
+      wsBadge: panel.querySelector('[data-role="ws-badge"]'),
+      stageBadge: panel.querySelector('[data-role="stage-badge"]'),
+      devMetricsEl: panel.querySelector('[data-role="dev-metrics"]'),
+      currentSegId: null,
+      currentTranslationSegId: null,
+    };
+  }
+
+  function setWsBadge(p, state) {
+    p.wsBadge.textContent = "connection: " + state;
+    p.wsBadge.className = "badge " + (state === "connected" ? "ok" : state === "disconnected" ? "err" : "warn");
+  }
+
+  function setStageBadge(p, status) {
+    p.stageBadge.textContent = "stage: " + status;
+    p.stageBadge.className = "badge " + (status === "running" ? "ok" : status === "error" ? "err" : "warn");
+  }
+
+  function addToHistory(p, text, translation) {
+    const div = document.createElement("div");
+    const orig = document.createElement("p");
+    orig.textContent = text;
+    div.appendChild(orig);
+    if (translation) {
+      const t = document.createElement("p");
+      t.className = "translation";
+      t.textContent = translation;
+      div.appendChild(t);
+    }
+    p.historyEl.prepend(div);
+    while (p.historyEl.children.length > HISTORY_LIMIT) {
+      p.historyEl.removeChild(p.historyEl.lastChild);
+    }
+  }
+
+  function updateDevMetrics(p, data) {
+    const parts = [data.type === "caption.final" ? "FINAL" : data.type === "caption.translation" ? "TRANSLATION" : "LIVE"];
+    if (data.timing) {
+      parts.push(`ASR ${(data.timing.asr_latency_ms / 1000).toFixed(1)}s`);
+    }
+    if (data.translation_latency_ms != null) {
+      parts.push(`translate ${(data.translation_latency_ms / 1000).toFixed(1)}s`);
+    }
+    p.devMetricsEl.textContent = parts.join(" · ");
+  }
+
+  function pollStageStatus(stageId, p) {
+    fetch("/health")
+      .then((r) => r.json())
+      .then((data) => setStageBadge(p, (data.stages && data.stages[stageId]) || "unknown"))
+      .catch(() => setStageBadge(p, "unknown"));
+  }
+
+  function connect(stageId, p) {
+    setWsBadge(p, "connecting");
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${protocol}://${location.host}/ws/audience/${encodeURIComponent(stageId)}`);
+
+    ws.onopen = () => setWsBadge(p, "connected");
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "caption.interim") {
+        p.currentSegId = data.seg_id;
+        p.liveEl.textContent = data.text;
+      } else if (data.type === "caption.final") {
+        if (p.currentSegId === data.seg_id) {
+          p.liveEl.textContent = "";
+          p.currentSegId = null;
+        }
+        p.currentTranslationSegId = data.seg_id;
+        addToHistory(p, data.text, null);
+      } else if (data.type === "caption.translation") {
+        // Attach to the matching final already in history, if present.
+        if (p.historyEl.firstElementChild && p.currentTranslationSegId === data.seg_id) {
+          const t = document.createElement("p");
+          t.className = "translation";
+          t.textContent = data.text;
+          p.historyEl.firstElementChild.appendChild(t);
+        }
+      }
+      updateDevMetrics(p, data);
+    };
+
+    ws.onclose = () => {
+      setWsBadge(p, "disconnected");
+      setTimeout(() => connect(stageId, p), 2000);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  fetch("/health")
+    .then((r) => r.json())
+    .then((data) => {
+      const stageIds = Object.keys(data.stages || {});
+      if (stageIds.length === 0) {
+        stagesEl.textContent = "No stages configured.";
+        return;
+      }
+      for (const stageId of stageIds) {
+        const p = createPanel(stageId);
+        panels[stageId] = p;
+        connect(stageId, p);
+        pollStageStatus(stageId, p);
+        setInterval(() => pollStageStatus(stageId, p), 5000);
+      }
+    })
+    .catch(() => {
+      stagesEl.textContent = "Failed to load /health.";
+    });
+})();
+</script>
+</body>
+</html>

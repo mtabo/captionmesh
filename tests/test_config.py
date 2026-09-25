@@ -41,6 +41,50 @@ def test_load_conference_config_parses_stages(tmp_path):
     assert stage.source.path == Path("data/audio/test-en.wav")
 
 
+def test_load_conference_config_parses_two_stages_with_mixed_source_types(tmp_path):
+    config_path = tmp_path / "stages.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            conference:
+              name: Nerdearla 2026
+
+            stages:
+              - id: main
+                name: Main Stage
+                language: auto
+                targets:
+                  - es
+                source:
+                  type: file
+                  path: data/audio/main.wav
+
+              - id: devroom
+                name: Dev Room
+                language: es
+                targets:
+                  - en
+                source:
+                  type: replay
+                  path: data/replay/devroom.json
+            """
+        )
+    )
+
+    conference = load_conference_config(config_path)
+
+    assert [s.id for s in conference.stages] == ["main", "devroom"]
+
+    main, devroom = conference.stages
+    assert main.source.type == "file"
+    assert main.source.path == Path("data/audio/main.wav")
+
+    assert devroom.language == "es"
+    assert devroom.targets == ["en"]
+    assert devroom.source.type == "replay"
+    assert devroom.source.path == Path("data/replay/devroom.json")
+
+
 def test_language_defaults_to_auto_when_omitted(tmp_path):
     config_path = tmp_path / "stages.yaml"
     config_path.write_text(

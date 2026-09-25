@@ -1,0 +1,9 @@
+[
+  {"delay_ms": 300, "text": "Bienvenidos", "is_final": false},
+  {"delay_ms": 400, "text": "Bienvenidos a la sala", "is_final": false},
+  {"delay_ms": 400, "text": "Bienvenidos a la sala de desarrollo", "is_final": false},
+  {"delay_ms": 300, "text": "Bienvenidos a la sala de desarrollo.", "is_final": true, "language": "es"},
+  {"delay_ms": 500, "text": "Esta es", "is_final": false},
+  {"delay_ms": 400, "text": "Esta es una demostración", "is_final": false},
+  {"delay_ms": 400, "text": "Esta es una demostración de repetición.", "is_final": true, "language": "es"}
+]

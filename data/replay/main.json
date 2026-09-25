@@ -1,0 +1,9 @@
+[
+  {"delay_ms": 300, "text": "Welcome", "is_final": false},
+  {"delay_ms": 400, "text": "Welcome to the", "is_final": false},
+  {"delay_ms": 400, "text": "Welcome to the Dev Room", "is_final": false},
+  {"delay_ms": 300, "text": "Welcome to the Dev Room.", "is_final": true, "language": "en"},
+  {"delay_ms": 500, "text": "This is", "is_final": false},
+  {"delay_ms": 400, "text": "This is a replay", "is_final": false},
+  {"delay_ms": 400, "text": "This is a replay demo.", "is_final": true, "language": "en"}
+]

@@ -1,48 +1,34 @@
-import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from app.broadcast import Broadcaster
 from app.config import load_conference_config
-from app.providers.gemini_asr import GeminiTranscriber
-from app.providers.gemini_translate import GeminiTranslator
-from app.stage import StagePipeline
-from app.store import JsonlEventStore
+from app.supervisor import StageSupervisor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 CONFIG_PATH = Path(os.environ.get("CAPTIONMESH_CONFIG", "config/stages.yaml"))
 STATIC_DIR = Path(__file__).parent / "static"
 
-pipelines: dict[str, StagePipeline] = {}
-broadcaster = Broadcaster()
-_tasks: list[asyncio.Task] = []
+supervisor: Optional[StageSupervisor] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global supervisor
     api_key = os.environ["GEMINI_API_KEY"]
     conference = load_conference_config(CONFIG_PATH)
-    store = JsonlEventStore()
-    # Stateless per call (no session), so one instance is shared across stages.
-    translator = GeminiTranslator(api_key=api_key)
-
-    for stage_config in conference.stages:
-        transcriber = GeminiTranscriber(api_key=api_key, language=stage_config.language)
-        pipeline = StagePipeline(stage_config, transcriber, store, broadcaster, translator)
-        pipelines[stage_config.id] = pipeline
-        _tasks.append(asyncio.create_task(pipeline.run()))
+    supervisor = StageSupervisor(conference, api_key=api_key)
+    supervisor.start_all()
 
     yield
 
-    for task in _tasks:
-        task.cancel()
-    await asyncio.gather(*_tasks, return_exceptions=True)
+    await supervisor.stop_all()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -50,12 +36,13 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    pipelines = supervisor.pipelines if supervisor else {}
     return {
         "status": "ok",
-        "stages": {stage_id: pipeline.status for stage_id, pipeline in pipelines.items()},
-        "latency": {stage_id: pipeline.stats.summary() for stage_id, pipeline in pipelines.items()},
+        "stages": {stage_id: p.status for stage_id, p in pipelines.items()},
+        "latency": {stage_id: p.stats.summary() for stage_id, p in pipelines.items()},
         "pending_translations": {
-            stage_id: pipeline.pending_translation_count for stage_id, pipeline in pipelines.items()
+            stage_id: p.pending_translation_count for stage_id, p in pipelines.items()
         },
     }
 
@@ -65,15 +52,21 @@ async def audience_page(stage_id: str):
     return FileResponse(STATIC_DIR / "audience.html")
 
 
+@app.get("/audience")
+async def audience_multi_page():
+    return FileResponse(STATIC_DIR / "audience_multi.html")
+
+
 @app.websocket("/ws/audience/{stage_id}")
 async def audience_ws(websocket: WebSocket, stage_id: str):
     await websocket.accept()
 
+    pipelines = supervisor.pipelines if supervisor else {}
     if stage_id not in pipelines:
         await websocket.close(code=4404, reason="unknown stage")
         return
 
-    queue = broadcaster.subscribe(stage_id)
+    queue = supervisor.broadcaster.subscribe(stage_id)
     try:
         while True:
             event = await queue.get()
@@ -81,4 +74,4 @@ async def audience_ws(websocket: WebSocket, stage_id: str):
     except WebSocketDisconnect:
         pass
     finally:
-        broadcaster.unsubscribe(stage_id, queue)
+        supervisor.broadcaster.unsubscribe(stage_id, queue)

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 import yaml
 from pydantic import BaseModel, Field
@@ -10,12 +10,20 @@ class FileSourceConfig(BaseModel):
     path: Path
 
 
+class ReplaySourceConfig(BaseModel):
+    type: Literal["replay"] = "replay"
+    path: Path
+
+
+SourceConfig = Annotated[Union[FileSourceConfig, ReplaySourceConfig], Field(discriminator="type")]
+
+
 class StageConfig(BaseModel):
     id: str
     name: str
     language: str = "auto"
     targets: list[str] = Field(default_factory=list)
-    source: FileSourceConfig
+    source: SourceConfig
 
 
 class ConferenceConfig(BaseModel):
