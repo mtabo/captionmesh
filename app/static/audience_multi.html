@@ -27,6 +27,18 @@
   .badge.ok { background: #14532d; }
   .badge.warn { background: #713f12; }
   .badge.err { background: #7f1d1d; }
+  .restart-btn {
+    margin-left: auto;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid #23262e;
+    background: #14161c;
+    color: #c7cad1;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .restart-btn:hover:not(:disabled) { background: #1c1f27; }
+  .restart-btn:disabled { opacity: 0.6; cursor: default; }
   #stages {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
@@ -93,6 +105,7 @@
       <h2>${stageId}
         <span class="badge" data-role="stage-badge">stage: …</span>
         <span class="badge" data-role="ws-badge">connection: …</span>
+        <button class="restart-btn" data-role="restart-btn" type="button">Restart session</button>
       </h2>
       <div class="live" data-role="live"></div>
       <div class="dev-metrics" data-role="dev-metrics"></div>
@@ -107,6 +120,7 @@
       stageBadge: panel.querySelector('[data-role="stage-badge"]'),
       devMetricsEl: panel.querySelector('[data-role="dev-metrics"]'),
       audioEl: panel.querySelector('[data-role="audio"]'),
+      restartBtn: panel.querySelector('[data-role="restart-btn"]'),
       currentSegId: null,
       // Connection/reconnect bookkeeping — see connect()/scheduleReconnect().
       ws: null,
@@ -303,6 +317,35 @@
     ws.onerror = () => ws.close();
   }
 
+  // Restarting a stage is handled by existing machinery: the broadcaster
+  // and WebSocket are keyed by stage_id, not by pipeline instance, so an
+  // already-connected client just keeps receiving events — no reconnect
+  // needed. If the stage had already ended (WS closed, no more retries),
+  // pollStageStatus (already running every 5s) already reconnects it on
+  // its own once it next sees stopped/error -> running. This only adds
+  // one immediate call to that *existing* function so the button feels
+  // responsive — no new polling loop.
+  function attachRestartButton(stageId, p) {
+    if (!p.restartBtn) return;
+    p.restartBtn.addEventListener("click", () => {
+      p.restartBtn.disabled = true;
+      const label = p.restartBtn.textContent;
+      p.restartBtn.textContent = "Restarting…";
+      fetch(`/api/stages/${encodeURIComponent(stageId)}/restart`, { method: "POST" })
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        })
+        .then(() => pollStageStatus(stageId, p))
+        .catch(() => {
+          // Fail open — the next scheduled 5s poll reflects reality either way.
+        })
+        .finally(() => {
+          p.restartBtn.disabled = false;
+          p.restartBtn.textContent = label;
+        });
+    });
+  }
+
   // On Play, sync the player to the stage's current processing position
   // (from /health's audio_position_ms) instead of letting the browser
   // start the file at 0:00 — CaptionMesh may already be minutes into it.
@@ -368,6 +411,7 @@
         panels[stageId] = p;
         connect(stageId, p);
         attachAudioSync(stageId, p);
+        attachRestartButton(stageId, p);
         pollStageStatus(stageId, p);
         setInterval(() => pollStageStatus(stageId, p), 5000);
       }

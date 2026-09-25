@@ -107,6 +107,19 @@ async def stage_captions_vtt(stage_id: str):
     return Response(content=vtt_content, media_type="text/vtt")
 
 
+@app.post("/api/stages/{stage_id}/restart")
+async def restart_stage(stage_id: str):
+    """Stops the stage's current session (if any) and starts a fresh one
+    from its existing config — no FastAPI/container restart, no config
+    change, no history deleted. See StageSupervisor.restart_stage."""
+    stage_configs = supervisor.stage_configs if supervisor else {}
+    if stage_id not in stage_configs:
+        raise HTTPException(status_code=404, detail="unknown stage")
+
+    pipeline = await supervisor.restart_stage(stage_id)
+    return {"stage_id": stage_id, "status": pipeline.status}
+
+
 @app.get("/api/stages/{stage_id}/audio")
 async def stage_audio(stage_id: str):
     """Streams the exact audio file `FileAudioSource` is transcribing for

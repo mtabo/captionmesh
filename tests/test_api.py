@@ -256,3 +256,43 @@ def test_captions_vtt_endpoint_unknown_stage_writes_nothing(tmp_path, monkeypatc
     assert traversal_response.status_code == 404
     # The unknown-stage check happens before any file is ever touched.
     assert not vtt_dir.exists()
+
+
+def test_restart_endpoint_unknown_stage_returns_404(tmp_path, monkeypatch, client):
+    monkeypatch.setattr(api_module, "supervisor", make_supervisor(tmp_path, []))
+
+    response = client.post("/api/stages/does-not-exist/restart")
+
+    assert response.status_code == 404
+
+
+def test_restart_endpoint_for_a_known_stage_returns_200_and_a_fresh_status(tmp_path, monkeypatch, client):
+    # No prior start_all() here: TestClient's synchronous .post() runs the
+    # request on its own event loop (a separate anyio portal), distinct from
+    # this test function's own loop — a task created via start_all() in
+    # *this* loop would belong to the wrong loop by the time the endpoint
+    # tries to await/cancel it. restart_stage() itself has no such
+    # constraint in the real app (lifespan and every request share one
+    # loop); this is purely about how TestClient is wired for tests. See
+    # test_supervisor.py for the "cancels a still-running previous task"
+    # case, exercised entirely within a single loop.
+    fixture_path = tmp_path / "main.json"
+    fixture_path.write_text("[]")  # empty replay: the session completes almost instantly
+    stage = StageConfig(
+        id="main", name="Main", language="en", targets=[],
+        source=ReplaySourceConfig(type="replay", path=fixture_path),
+    )
+    supervisor = make_supervisor(tmp_path, [stage])
+    monkeypatch.setattr(api_module, "supervisor", supervisor)
+
+    response = client.post("/api/stages/main/restart")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stage_id"] == "main"
+    assert body["status"] in ("created", "running", "stopped")
+    # The endpoint returned a genuinely new pipeline instance for the stage.
+    assert supervisor.pipelines["main"] is not None
+    # Not awaiting the background task here: it belongs to TestClient's own
+    # event loop (see comment above), not this test function's — it
+    # finishes on its own (empty replay fixture) when that loop is torn down.
