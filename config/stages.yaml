@@ -14,4 +14,4 @@ stages:
       - es
     source:
       type: file
-      path: data/audio/test-en.wav
+      path: data/audio/nerdearla-demo-60s.wav
