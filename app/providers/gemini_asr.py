@@ -12,6 +12,12 @@ from app.sources.ffmpeg import SAMPLE_RATE, SAMPLE_WIDTH_BYTES
 DEFAULT_MODEL = "gemini-3.5-transcribe-live"
 DEFAULT_MODE = "SMART"
 RECEIVE_GRACE_SECONDS = 15
+
+# send_realtime_input() can block indefinitely if the connection has died
+# silently and the write buffer is congested — the websockets library's own
+# docs say cancelling a stuck send() is unsafe and recommend closing the
+# connection instead (see _send_with_timeout). This bounds that wait.
+SEND_TIMEOUT_SECONDS = 30
 BYTES_PER_MS = SAMPLE_RATE * SAMPLE_WIDTH_BYTES / 1000
 DRIFT_SAMPLE_INTERVAL_MS = 1000
 
@@ -218,6 +224,32 @@ class GeminiTranscriber:
         wall_elapsed_ms = (time.monotonic() - self._stream_started_at) * 1000
         return self._audio_elapsed_ms, wall_elapsed_ms - self._audio_elapsed_ms
 
+    async def _send_with_timeout(self, session, **kwargs) -> None:
+        """Bounded wrapper around `session.send_realtime_input()`.
+
+        A dead-but-unclosed connection can leave this awaiting flow-control
+        forever (observed in production as TCP CLOSE_WAIT while the sender
+        was still active). websockets' own docs say cancelling a stuck
+        send() is unsafe and to close the connection instead — so on
+        timeout we explicitly close the session rather than relying on
+        `sender.cancel()` alone, then let the exception propagate: the
+        receive loop unblocks (closed session ends its receive iterator),
+        `_run_session`'s existing `finally` retrieves this exception via
+        `await sender`, and the existing reconnect/backoff loop in
+        transcribe() takes over. No new reconnect logic here.
+        """
+        try:
+            await asyncio.wait_for(
+                session.send_realtime_input(**kwargs), timeout=SEND_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[asr] send_realtime_input timed out after %.0fs; closing session",
+                SEND_TIMEOUT_SECONDS,
+            )
+            await session.close()
+            raise
+
     async def _send_audio_for_session(
         self, session, chunk_iter, session_started_at: float, outcome: dict
     ) -> None:
@@ -231,8 +263,8 @@ class GeminiTranscriber:
                 outcome["reason"] = "exhausted"
                 break
 
-            await session.send_realtime_input(
-                audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={SAMPLE_RATE}")
+            await self._send_with_timeout(
+                session, audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={SAMPLE_RATE}")
             )
             self._audio_elapsed_ms += len(chunk) / BYTES_PER_MS
 
@@ -244,4 +276,4 @@ class GeminiTranscriber:
                 wall_elapsed_ms = (time.monotonic() - self._stream_started_at) * 1000
                 self._on_send_sample(self._audio_elapsed_ms, wall_elapsed_ms)
 
-        await session.send_realtime_input(audio_stream_end=True)
+        await self._send_with_timeout(session, audio_stream_end=True)

@@ -52,6 +52,7 @@ class FakeSession:
         self._stream_end_event = asyncio.Event()
         self.sent_chunks = []
         self.stream_ended = False
+        self.closed = False
 
     async def send_realtime_input(self, audio=None, audio_stream_end=None):
         if audio is not None:
@@ -59,6 +60,12 @@ class FakeSession:
         if audio_stream_end:
             self.stream_ended = True
             self._stream_end_event.set()
+
+    async def close(self) -> None:
+        # Mirrors the real SDK: closing unblocks receive() (it's awaiting
+        # the same "stream is over" condition), and is idempotent.
+        self.closed = True
+        self._stream_end_event.set()
 
     async def receive(self):
         for delay_s, message in self._timed_messages:
@@ -289,6 +296,52 @@ async def test_receive_timeout_while_sender_is_still_active_triggers_reconnect(m
     # existing reconnect logic started session #2, which produced output.
     assert [s.text for s in segments] == ["Recovered."]
     assert segments[0].session_boundary is True
+
+
+async def test_send_timeout_closes_session_and_triggers_reconnect(monkeypatch):
+    """Regression test for the RC hang that recurred *after* the receive-side
+    fix: session #1's connection dies silently on the SEND side (websockets'
+    own docs warn that cancelling a stuck send() when the write buffer is
+    full is unsafe) while nothing ever raises. send_realtime_input() must be
+    bounded by SEND_TIMEOUT_SECONDS; on timeout the stuck session must be
+    closed explicitly (not just cancelled), which unblocks receive() too,
+    and the existing reconnect/backoff loop must take over."""
+    monkeypatch.setattr(gemini_asr_module, "SEND_TIMEOUT_SECONDS", 0.02)
+
+    class SendHangsAfterNSession(FakeSession):
+        def __init__(self, hang_after=3, **kwargs):
+            super().__init__(**kwargs)
+            self._hang_after = hang_after
+
+        async def send_realtime_input(self, audio=None, audio_stream_end=None):
+            if audio is not None and len(self.sent_chunks) >= self._hang_after:
+                await asyncio.Event().wait()  # never resolves: simulates a dead write
+            await super().send_realtime_input(audio=audio, audio_stream_end=audio_stream_end)
+
+    session1 = SendHangsAfterNSession(hang_after=3)
+    session2 = FakeSession(
+        timed_messages=[(0.005, FakeMessage(FakeServerContent(
+            final=FakeTranscription("Recovered.", finished=True, language_code="en")
+        )))]
+    )
+    transcriber = GeminiTranscriber(api_key="unused", session_rotation_seconds=999)
+    transcriber._connect = make_connect([session1, session2])
+
+    segments = [
+        seg async for seg in transcriber.transcribe(make_audio_source(n_chunks=50, delay=0.005))
+    ]
+
+    # 1-3. The sender genuinely sent chunks, then hung, then got bounded.
+    assert len(session1.sent_chunks) == 3
+    # session.close() was called explicitly, not just sender.cancel().
+    assert session1.closed is True
+    # 5-7. The existing reconnect/backoff loop started session #2, which
+    # produced a recovered segment with a fresh session boundary.
+    assert [s.text for s in segments] == ["Recovered."]
+    assert segments[0].session_boundary is True
+
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+    assert pending == []
 
 
 async def test_bounded_retry_eventually_fails_cleanly():
