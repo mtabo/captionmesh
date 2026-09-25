@@ -51,7 +51,9 @@ class StageSupervisor:
         self._api_key = api_key
         self.broadcaster = broadcaster or Broadcaster()
         self.store = store or JsonlEventStore()
-        self._translator = translator or GeminiTranslator(api_key=api_key, model=TRANSLATOR_MODEL)
+        self._translator = translator or GeminiTranslator(
+            api_key=api_key, model=TRANSLATOR_MODEL, glossary=conference.gemini.glossary
+        )
         # No default segmenter: a per-final Gemini segmentation call sits on
         # the caption's critical path and was measured timing out (10s) under
         # load. Finals are emitted as Gemini produced them unless one is
@@ -69,6 +71,7 @@ class StageSupervisor:
                 language=stage_config.language,
                 mode=TRANSCRIBE_MODE,
                 session_rotation_seconds=self._conference.gemini.session_rotation_seconds,
+                custom_vocabulary=self._conference.gemini.glossary,
             )
             audio_source = FileAudioSource(Path(source.path))
         elif isinstance(source, ReplaySourceConfig):

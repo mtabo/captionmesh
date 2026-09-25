@@ -410,3 +410,44 @@ async def test_a_failing_stage_does_not_affect_another_stage(tmp_path):
     import json
     devroom_lines = (tmp_path / "devroom.jsonl").read_text().splitlines()
     assert [json.loads(line)["text"] for line in devroom_lines] == ["Hola."]
+
+
+def _capture_connect_config(monkeypatch, session):
+    """Patches genai.Client so a real (unmonkeypatched) _connect() call can
+    be inspected: records the LiveConnectConfig built and returns `session`
+    via the existing FakeConnectCM."""
+    captured = {}
+
+    class FakeLive:
+        def connect(self, model, config):
+            captured["config"] = config
+            return FakeConnectCM(session)
+
+    class FakeAio:
+        def __init__(self):
+            self.live = FakeLive()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.aio = FakeAio()
+
+    monkeypatch.setattr(gemini_asr_module.genai, "Client", FakeClient)
+    return captured
+
+
+def test_custom_vocabulary_is_passed_to_audio_transcription_config(monkeypatch):
+    captured = _capture_connect_config(monkeypatch, FakeSession())
+    transcriber = GeminiTranscriber(api_key="unused", custom_vocabulary=["Firebase", "Kubernetes"])
+
+    transcriber._connect()
+
+    assert captured["config"].input_audio_transcription.custom_vocabulary == ["Firebase", "Kubernetes"]
+
+
+def test_no_custom_vocabulary_by_default_preserves_existing_behavior(monkeypatch):
+    captured = _capture_connect_config(monkeypatch, FakeSession())
+    transcriber = GeminiTranscriber(api_key="unused")
+
+    transcriber._connect()
+
+    assert captured["config"].input_audio_transcription.custom_vocabulary is None

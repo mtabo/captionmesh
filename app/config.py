@@ -26,6 +26,28 @@ class StageConfig(BaseModel):
     source: SourceConfig
 
 
+# Technical terms/proper nouns biased for ASR recognition (via
+# AudioTranscriptionConfig.custom_vocabulary) and preserved untranslated in
+# translation (via GeminiTranslator's system_instruction) — same list, two
+# native Gemini mechanisms, no extra model calls either side.
+DEFAULT_GLOSSARY = [
+    "Firebase",
+    "Firebase Studio",
+    "Google Cloud",
+    "Gemini",
+    "Nerdearla",
+    "CaptionMesh",
+    "FastAPI",
+    "WebSocket",
+    "Docker",
+    "FFmpeg",
+    "Kubernetes",
+    "Python",
+    "JavaScript",
+    "TypeScript",
+]
+
+
 class GeminiConfig(BaseModel):
     # Gemini Live Transcribe sessions have a documented ~10 minute limit.
     # Default rotates a full minute before that, not at the exact boundary.
@@ -35,6 +57,10 @@ class GeminiConfig(BaseModel):
     # one degraded session (first interim after ~12s, then silence);
     # spacing session creation apart avoids that. 0 = start all at once.
     session_start_stagger_seconds: float = 0.0
+    # Technical terms/proper nouns to bias ASR recognition toward and
+    # preserve untranslated. Override per-deployment via YAML; empty list
+    # disables both (no vocabulary bias, no glossary instruction).
+    glossary: list[str] = Field(default_factory=lambda: list(DEFAULT_GLOSSARY))
 
 
 class ConferenceConfig(BaseModel):

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Callable, Optional, Sequence
 
 from google import genai
 from google.genai import types
@@ -58,10 +58,15 @@ class GeminiTranscriber:
         mode: str = DEFAULT_MODE,
         on_send_sample: Optional[Callable[[float, float], None]] = None,
         session_rotation_seconds: float = DEFAULT_SESSION_ROTATION_SECONDS,
+        custom_vocabulary: Sequence[str] = (),
     ) -> None:
         """`on_send_sample`, if given, is called roughly every second of audio
         content sent with (audio_elapsed_ms, wall_elapsed_ms) — diagnostic
         only, unused by default and not wired into production call sites.
+
+        `custom_vocabulary` biases ASR recognition toward these terms, via
+        the SDK's native `AudioTranscriptionConfig.custom_vocabulary` — no
+        extra model call.
         """
         self._api_key = api_key
         self._language = language
@@ -69,6 +74,7 @@ class GeminiTranscriber:
         self._mode = mode
         self._on_send_sample = on_send_sample
         self._session_rotation_seconds = session_rotation_seconds
+        self._custom_vocabulary = list(custom_vocabulary)
         self._stream_started_at: Optional[float] = None
         self._audio_elapsed_ms: float = 0.0
         self._last_sampled_audio_ms: float = 0.0
@@ -123,6 +129,7 @@ class GeminiTranscriber:
             input_audio_transcription=types.AudioTranscriptionConfig(
                 language_codes=language_codes,
                 mode=self._mode,
+                custom_vocabulary=self._custom_vocabulary or None,
             ),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(

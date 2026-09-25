@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config import load_conference_config
+from app.config import DEFAULT_GLOSSARY, load_conference_config
 
 
 def test_load_conference_config_parses_stages(tmp_path):
@@ -104,3 +104,73 @@ def test_language_defaults_to_auto_when_omitted(tmp_path):
 
     assert conference.stages[0].language == "auto"
     assert conference.stages[0].targets == []
+
+
+def test_glossary_defaults_when_gemini_section_omitted(tmp_path):
+    config_path = tmp_path / "stages.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            stages:
+              - id: main
+                name: Main Stage
+                source:
+                  type: file
+                  path: data/audio/test-en.wav
+            """
+        )
+    )
+
+    conference = load_conference_config(config_path)
+
+    assert conference.gemini.glossary == DEFAULT_GLOSSARY
+    assert "Firebase" in conference.gemini.glossary
+    assert "Kubernetes" in conference.gemini.glossary
+
+
+def test_glossary_can_be_overridden_from_yaml(tmp_path):
+    config_path = tmp_path / "stages.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            gemini:
+              glossary:
+                - Nerdearla
+                - CaptionMesh
+
+            stages:
+              - id: main
+                name: Main Stage
+                source:
+                  type: file
+                  path: data/audio/test-en.wav
+            """
+        )
+    )
+
+    conference = load_conference_config(config_path)
+
+    assert conference.gemini.glossary == ["Nerdearla", "CaptionMesh"]
+
+
+def test_glossary_can_be_disabled_with_an_empty_list(tmp_path):
+    config_path = tmp_path / "stages.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            gemini:
+              glossary: []
+
+            stages:
+              - id: main
+                name: Main Stage
+                source:
+                  type: file
+                  path: data/audio/test-en.wav
+            """
+        )
+    )
+
+    conference = load_conference_config(config_path)
+
+    assert conference.gemini.glossary == []
