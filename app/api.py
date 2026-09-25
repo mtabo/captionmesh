@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from app.broadcast import Broadcaster
 from app.config import load_conference_config
 from app.providers.gemini_asr import GeminiTranscriber
+from app.providers.gemini_translate import GeminiTranslator
 from app.stage import StagePipeline
 from app.store import JsonlEventStore
 
@@ -28,10 +29,12 @@ async def lifespan(app: FastAPI):
     api_key = os.environ["GEMINI_API_KEY"]
     conference = load_conference_config(CONFIG_PATH)
     store = JsonlEventStore()
+    # Stateless per call (no session), so one instance is shared across stages.
+    translator = GeminiTranslator(api_key=api_key)
 
     for stage_config in conference.stages:
         transcriber = GeminiTranscriber(api_key=api_key, language=stage_config.language)
-        pipeline = StagePipeline(stage_config, transcriber, store, broadcaster)
+        pipeline = StagePipeline(stage_config, transcriber, store, broadcaster, translator)
         pipelines[stage_config.id] = pipeline
         _tasks.append(asyncio.create_task(pipeline.run()))
 
@@ -51,6 +54,9 @@ async def health():
         "status": "ok",
         "stages": {stage_id: pipeline.status for stage_id, pipeline in pipelines.items()},
         "latency": {stage_id: pipeline.stats.summary() for stage_id, pipeline in pipelines.items()},
+        "pending_translations": {
+            stage_id: pipeline.pending_translation_count for stage_id, pipeline in pipelines.items()
+        },
     }
 
 

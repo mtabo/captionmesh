@@ -41,11 +41,12 @@ class LatencySampler:
 
 
 class StageLatencyStats:
-    """Per-stage ASR latency stats, split by interim vs final events."""
+    """Per-stage latency stats: ASR interim/final, plus translation."""
 
     def __init__(self) -> None:
         self.interim = LatencySampler()
         self.final = LatencySampler()
+        self.translation = LatencySampler()
 
     def record_interim(self, latency_ms: Optional[float]) -> None:
         if latency_ms is not None:
@@ -55,8 +56,13 @@ class StageLatencyStats:
         if latency_ms is not None:
             self.final.record(latency_ms)
 
+    def record_translation(self, latency_ms: Optional[float]) -> None:
+        if latency_ms is not None:
+            self.translation.record(latency_ms)
+
     def summary(self) -> dict:
         return {
             "interim": self.interim.summary().model_dump(),
             "final": self.final.summary().model_dump(),
+            "translation": self.translation.summary().model_dump(),
         }

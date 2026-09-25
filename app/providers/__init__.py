@@ -17,3 +17,8 @@ class TranscriptSegment(BaseModel):
 class TranscriptionProvider(Protocol):
     def transcribe(self, audio_chunks: AsyncIterator[bytes]) -> AsyncIterator[TranscriptSegment]:
         ...
+
+
+class TranslationProvider(Protocol):
+    async def translate(self, text: str, source_language: str, target_language: str) -> str:
+        ...

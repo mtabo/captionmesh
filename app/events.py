@@ -35,4 +35,18 @@ class CaptionFinalEvent(_CaptionEventBase):
     type: Literal["caption.final"] = "caption.final"
 
 
-StageEvent = Union[CaptionInterimEvent, CaptionFinalEvent]
+class CaptionTranslationEvent(_CaptionEventBase):
+    """A translation of one finalized segment into one target language.
+
+    `language` (inherited) is the target language; `source_language` is the
+    original transcript's language. Both are recorded so a consumer never
+    has to infer one from the other. Correlates to its source
+    `CaptionFinalEvent` via the same `seg_id`.
+    """
+
+    type: Literal["caption.translation"] = "caption.translation"
+    source_language: str
+    translation_latency_ms: Optional[float] = None
+
+
+StageEvent = Union[CaptionInterimEvent, CaptionFinalEvent, CaptionTranslationEvent]

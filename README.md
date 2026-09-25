@@ -9,8 +9,10 @@ full architecture and `CLAUDE.md` for development rules.
 The real `StagePipeline` runs inside the FastAPI process defined in `app/api.py`.
 It wires together `FileAudioSource` (ffmpeg) → `GeminiTranscriber` → `caption.interim`
 / `caption.final` events, broadcast live to audience clients and, for finals only,
-persisted as JSONL. Translation is not implemented yet — see `docs/spec.md` for
-the full pipeline.
+persisted as JSONL. Finalized segments are then translated into each configured
+`target` (via `GeminiTranslator`) into `caption.translation` events, sharing the
+same `seg_id` and also broadcast + persisted. See `docs/spec.md` for the full
+pipeline.
 
 Stages are configured in `config/stages.yaml`:
 
@@ -46,6 +48,42 @@ docker compose up app
 - A stage's transcription failure is caught inside `StagePipeline.run()` and
   reflected as `status: "error"` rather than crashing the process, so other
   stages (once multi-stage support lands) stay unaffected.
+
+### Translation
+
+`GeminiTranslator` (`app/providers/gemini_translate.py`) implements a
+minimal `TranslationProvider` Protocol (`app/providers/__init__.py`):
+`translate(text, source_language, target_language) -> str`, one stateless
+call per finalized segment. `StagePipeline` calls it only from `_handle_final`
+(never for interim events), once per configured `targets` entry, skipping any
+target equal to the source language. A per-target translation failure is
+logged and skipped — it does not stop other targets or crash the stage.
+
+Translation runs as an independent, tracked `asyncio.Task` per (segment,
+target) pair — `_handle_final` schedules it via `asyncio.create_task` and
+never awaits it, so a slow or failing translation call (observed 10–42s
+against `gemini-3.5-flash` under real service load) cannot block reading
+further transcription messages. This fixed a real, measured problem from an
+earlier version that awaited translation inline: it inflated subsequent ASR
+latency and, in one run, caused the Gemini Live transcription session itself
+to be aborted (`1008: operation aborted`) from inactivity while a 42s
+translation call was in flight. Verified fixed against the real API: a
+second `caption.final` was processed and persisted while the first one's
+translation was still 10s from completing, with ASR latency staying low
+throughout.
+
+When `StagePipeline.run()`'s main loop ends, pending translation tasks get a
+short grace window (`TRANSLATION_SHUTDOWN_GRACE_SECONDS = 5`, overridable
+per instance) to finish before being cancelled — bounded so shutdown can't
+hang indefinitely on a stuck call, at the cost of occasionally cancelling a
+translation that was still legitimately in flight (observed for real: one
+run cancelled a translation started near the end of the session once the
+5s grace elapsed, logged clearly, no error). `GET /health` exposes
+`pending_translations` per stage.
+
+The audience page does not yet render `caption.translation` events (only
+`caption.interim`/`caption.final`) — they flow over the existing WebSocket
+and get persisted, but displaying them is unimplemented UI work.
 
 ### Audience view
 
