@@ -72,6 +72,70 @@ longer than 5s, cancelling it — observed directly in testing. This is the
 same disclosed trade-off as before, just more visible on short demo content
 than on a multi-minute real talk.
 
+## Scaling
+
+CaptionMesh models each conference session as an independent `StagePipeline`,
+created and run by `StageSupervisor` (see "Multi-Stage Support" above). Each
+stage owns its own:
+
+- audio source
+- transcription session
+- translation tasks
+- event stream
+- audience WebSocket connections
+- caption store (`data/stages/<stage_id>.jsonl`)
+
+Multiple stages run concurrently, each as its own `asyncio.Task`, under a
+single `StageSupervisor`. Adding a session therefore means adding a stage to
+the configuration — the processing logic (`StagePipeline`) is unchanged:
+
+```yaml
+stages:
+  - id: main
+    name: Main Stage
+    language: en
+    targets: [es]
+    source:
+      type: file
+      path: data/audio/main.wav
+
+  - id: devroom
+    name: Dev Room
+    language: es
+    targets: [en]
+    source:
+      type: replay
+      path: data/replay/devroom.json
+
+  - id: workshop-1
+    name: Workshop 1
+    language: en
+    targets: [es]
+    source:
+      type: file
+      path: data/audio/workshop-1.wav
+
+  - id: workshop-2
+    name: Workshop 2
+    language: es
+    targets: [en]
+    source:
+      type: file
+      path: data/audio/workshop-2.wav
+```
+
+The current implementation scales conceptually by adding independent stage
+pipelines within a single application process — the same pattern already
+demonstrated above with two concurrent stages, just with more entries. This
+has not been measured beyond what's demonstrated in this README, so no
+specific number of simultaneous stages is claimed here.
+
+For larger deployments, stages could be distributed across multiple
+application instances while keeping the same per-stage processing model
+unchanged. A shared state/event layer between instances would only be
+introduced if cross-instance coordination actually became necessary — not
+before, per this project's anti-ceremony rules (see `CLAUDE.md`).
+
 ## ASR Session Rotation
 
 Gemini Live Transcribe sessions have a documented ~10 minute limit.
@@ -146,7 +210,7 @@ docker compose up app
   `"auto"` — the app never assumes the provider supplies a reliable code.
 - A stage's transcription failure is caught inside `StagePipeline.run()` and
   reflected as `status: "error"` rather than crashing the process, so other
-  stages (once multi-stage support lands) stay unaffected.
+  stages stay unaffected.
 
 ### Translation
 
