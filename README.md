@@ -96,7 +96,7 @@ The default config (`config/stages.yaml`) is already set up to caption a
 demo fixture included in the repo:
 
 ```
-data/audio/nerdearla-demo-60s.wav
+data/audio/nerdearla-demo-main.wav
 ```
 
 This is a ~60-second excerpt from a real Nerdearla conference talk, included
