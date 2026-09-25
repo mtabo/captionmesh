@@ -180,9 +180,11 @@ run cancelled a translation started near the end of the session once the
 5s grace elapsed, logged clearly, no error). `GET /health` exposes
 `pending_translations` per stage.
 
-The audience page does not yet render `caption.translation` events (only
-`caption.interim`/`caption.final`) — they flow over the existing WebSocket
-and get persisted, but displaying them is unimplemented UI work.
+The single-stage audience page (`audience.html`) does not yet render
+`caption.translation` events (only `caption.interim`/`caption.final`) — they
+flow over the existing WebSocket and get persisted, but displaying them on
+this page is unimplemented UI work. The multi-stage audience page
+(`audience_multi.html`, see "Multi-Stage Support" above) does render them.
 
 ### Audience view
 
@@ -233,10 +235,6 @@ accounted for time spent elsewhere in the send loop; deadline-based pacing
 holds drift flat instead.
 - `StagePipeline` has no dependency on FastAPI or WebSockets; it only calls
   `Broadcaster.publish(event)`, so the transport is fully swappable.
-
-Session rotation/reconnect for the ~minutes-long Gemini Live session limit is
-not implemented yet — a long-running stage will simply stop once the session
-ends.
 
 ## Gemini Live Transcription Spike
 
@@ -327,3 +325,7 @@ RESULT: PASS
 ```bash
 docker compose run --rm --entrypoint bash spike -c "python -m pytest tests/ -v"
 ```
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
