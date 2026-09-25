@@ -248,6 +248,49 @@ async def test_transient_disconnect_triggers_reconnect_and_transcription_continu
     assert segments[0].session_boundary is True
 
 
+async def test_receive_timeout_while_sender_is_still_active_triggers_reconnect(monkeypatch):
+    """Regression test for the RC-validation hang: session #1's connection
+    dies silently (no exception, no message — the receive() coroutine just
+    never responds) while the sender is STILL actively sending (not done).
+    Before the fix, this branch awaited receive_iter.__anext__() with no
+    timeout at all and hung forever. It must now bound on
+    RECEIVE_GRACE_SECONDS just like the sender-done branch already did,
+    let the existing cleanup cancel the sender, and let the existing
+    reconnect/backoff loop start a new session."""
+    monkeypatch.setattr(gemini_asr_module, "RECEIVE_GRACE_SECONDS", 0.02)
+
+    class NeverRespondingSession(FakeSession):
+        async def receive(self):
+            # Never yields, never raises: simulates a connection that died
+            # silently (observed as CLOSE_WAIT in production) without the
+            # SDK ever surfacing an exception from the receive iterator.
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - unreachable; keeps this a generator
+
+    session1 = NeverRespondingSession()
+    session2 = FakeSession(
+        timed_messages=[(0.005, FakeMessage(FakeServerContent(
+            final=FakeTranscription("Recovered.", finished=True, language_code="en")
+        )))]
+    )
+    transcriber = GeminiTranscriber(api_key="unused", session_rotation_seconds=999)
+    transcriber._connect = make_connect([session1, session2])
+
+    # Deliberately outlives RECEIVE_GRACE_SECONDS (0.02s) so the sender is
+    # still actively sending — sender.done() is False — at the moment the
+    # receive timeout fires.
+    segments = [
+        seg async for seg in transcriber.transcribe(make_audio_source(n_chunks=50, delay=0.005))
+    ]
+
+    # 1. The sender genuinely was active (it sent real chunks to session1).
+    assert len(session1.sent_chunks) > 0
+    # 4-6. _run_session unblocked, cleanup cancelled the sender, and the
+    # existing reconnect logic started session #2, which produced output.
+    assert [s.text for s in segments] == ["Recovered."]
+    assert segments[0].session_boundary is True
+
+
 async def test_bounded_retry_eventually_fails_cleanly():
     def always_fail():
         raise ConnectionError("simulated connect failure")

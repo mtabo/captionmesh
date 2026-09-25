@@ -134,12 +134,17 @@ class GeminiTranscriber:
             try:
                 while True:
                     try:
-                        if sender.done():
-                            message = await asyncio.wait_for(
-                                receive_iter.__anext__(), timeout=RECEIVE_GRACE_SECONDS
-                            )
-                        else:
-                            message = await receive_iter.__anext__()
+                        # Bounded regardless of sender state: if the sender is
+                        # still active but the connection has died silently
+                        # (observed in production as a server-initiated close
+                        # the SDK never surfaced as an exception — the socket
+                        # sat in CLOSE_WAIT), this must not hang forever. On
+                        # timeout we break out below, the existing `finally`
+                        # cancels the sender, and the existing outer
+                        # reconnect/backoff loop in transcribe() takes over.
+                        message = await asyncio.wait_for(
+                            receive_iter.__anext__(), timeout=RECEIVE_GRACE_SECONDS
+                        )
                     except (StopAsyncIteration, asyncio.TimeoutError):
                         break
 
