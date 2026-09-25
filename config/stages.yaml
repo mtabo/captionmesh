@@ -1,0 +1,12 @@
+conference:
+  name: CaptionMesh Demo
+
+stages:
+  - id: main
+    name: Main Stage
+    language: auto
+    targets:
+      - es
+    source:
+      type: file
+      path: data/audio/test-en.wav

@@ -1,0 +1,38 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - ./data:/workspace/data
+      - ./app:/workspace/app
+      - ./tests:/workspace/tests
+      - ./config:/workspace/config
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  spike:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - ./data:/workspace/data
+      - ./app:/workspace/app
+      - ./tests:/workspace/tests
+    command: ["python", "app/spike_transcription.py"]
+
+  gen-audio:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - ./data:/workspace/data
+      - ./app:/workspace/app
+    command: ["python", "app/generate_test_audio.py"]
