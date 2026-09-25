@@ -24,10 +24,15 @@ Timing is intentionally honest, not invented:
   timestamp. See README for this limitation.
 """
 
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 WEBVTT_HEADER = "WEBVTT"
 VTT_OUTPUT_DIR = Path("data/vtt")
+
+# Filesystem-safe: no ":" (invalid/awkward on some filesystems and shells).
+VTT_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
 def _format_timestamp(ms: float) -> str:
@@ -87,5 +92,27 @@ def write_vtt_file(stage_id: str, vtt_content: str, base_dir: Path = VTT_OUTPUT_
     """
     base_dir.mkdir(parents=True, exist_ok=True)
     path = base_dir / f"{stage_id}.vtt"
+    path.write_text(vtt_content, encoding="utf-8")
+    return path
+
+
+def write_timestamped_vtt_file(
+    stage_id: str, vtt_content: str, when: Optional[datetime] = None, base_dir: Path = VTT_OUTPUT_DIR
+) -> Path:
+    """Persists a WebVTT snapshot as <base_dir>/<stage_id>_<timestamp>.vtt —
+    one archived file per completed StagePipeline session (see
+    `StagePipeline.run()`), distinct from `write_vtt_file`'s single
+    always-latest `<stage_id>.vtt` used by the on-demand endpoint. Same
+    generation logic (`build_vtt`) and the same safety property as
+    `write_vtt_file` (caller must validate `stage_id` first) — this is only
+    a different destination filename, not a second way of building VTT.
+
+    `when` defaults to the real current time; tests should pass a fixed
+    value instead of depending on the real clock.
+    """
+    when = when or datetime.now()
+    timestamp = when.strftime(VTT_TIMESTAMP_FORMAT)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / f"{stage_id}_{timestamp}.vtt"
     path.write_text(vtt_content, encoding="utf-8")
     return path

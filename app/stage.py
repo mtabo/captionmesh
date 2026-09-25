@@ -3,7 +3,9 @@ import logging
 import re
 import time
 from collections import deque
-from typing import Optional
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
 
 from app.broadcast import Broadcaster
 from app.config import StageConfig
@@ -12,6 +14,7 @@ from app.providers import SegmentationProvider, TranscriptionProvider, Transcrip
 from app.sources import AudioSource
 from app.stats import StageLatencyStats
 from app.store import JsonlEventStore
+from app.vtt import build_vtt, write_timestamped_vtt_file
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +113,8 @@ class StagePipeline:
         segmentation_shutdown_grace_seconds: float = SEGMENTATION_SHUTDOWN_GRACE_SECONDS,
         segmentation_timeout_seconds: float = SEGMENTATION_TIMEOUT_SECONDS,
         audio_source: Optional[AudioSource] = None,
+        vtt_output_dir: Optional[Path] = None,
+        vtt_timestamp_fn: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._config = config
         self._transcriber = transcriber
@@ -121,6 +126,16 @@ class StagePipeline:
         self._segmentation_shutdown_grace_seconds = segmentation_shutdown_grace_seconds
         self._segmentation_timeout_seconds = segmentation_timeout_seconds
         self._audio_source = audio_source
+        # Where/when _write_session_vtt (see run()) writes its timestamped
+        # snapshot. None (the default) disables it entirely — an explicit
+        # opt-in, not "write to data/vtt/ unless told otherwise": dozens of
+        # existing tests construct a StagePipeline directly and run it to
+        # completion without caring about VTT at all, and defaulting to the
+        # real VTT_OUTPUT_DIR meant every one of them silently wrote files
+        # into the real data/vtt/ on every test run. StageSupervisor (the
+        # only production call site) passes VTT_OUTPUT_DIR explicitly.
+        self._vtt_output_dir = vtt_output_dir
+        self._vtt_timestamp_fn = vtt_timestamp_fn
         self._seg_counter = 0
         self._current_seg_id: str | None = None
         self.status = "created"
@@ -195,6 +210,32 @@ class StagePipeline:
             # Segmentation feeds translation scheduling, so drain it first.
             await self._shutdown_segmentation_worker()
             await self._shutdown_pending_translations()
+            if self.status == "stopped":
+                # Only a session that finished cleanly gets an archived VTT
+                # snapshot — not one still running, and not one that ended
+                # in "error" (its event stream may be incomplete/mid-final).
+                self._write_session_vtt()
+
+    def _write_session_vtt(self) -> None:
+        """Auto-generates a timestamped WebVTT archive of this completed
+        session, derived from the same persisted event store the on-demand
+        `captions.vtt` endpoint reads (`build_vtt` — no second source of
+        truth). A write failure (e.g. disk full) is logged, not raised —
+        it must never make an otherwise-successful session look failed."""
+        if self._vtt_output_dir is None:
+            return
+        try:
+            events = self._store.read_events(self._config.id)
+            vtt_content = build_vtt(events)
+            path = write_timestamped_vtt_file(
+                self._config.id,
+                vtt_content,
+                when=self._vtt_timestamp_fn(),
+                base_dir=self._vtt_output_dir,
+            )
+            logger.info("[%s] wrote session VTT snapshot: %s", self._config.id, path)
+        except Exception:
+            logger.exception("[%s] failed to write session VTT snapshot", self._config.id)
 
     def _resolve_language(self, segment: TranscriptSegment) -> str:
         return segment.language or (

@@ -1,9 +1,10 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.vtt import _format_timestamp, build_vtt, write_vtt_file
+from app.vtt import _format_timestamp, build_vtt, write_timestamped_vtt_file, write_vtt_file
 
 
 def final(seg_id, text, audio_elapsed_ms, stage_id="main"):
@@ -202,3 +203,71 @@ def test_write_vtt_file_keeps_different_stages_in_separate_files(tmp_path):
     assert "Main text." in main_path.read_text(encoding="utf-8")
     assert "Devroom text." in devroom_path.read_text(encoding="utf-8")
     assert "Devroom text." not in main_path.read_text(encoding="utf-8")
+
+
+def test_write_timestamped_vtt_file_uses_stage_id_and_formatted_timestamp(tmp_path):
+    base_dir = tmp_path / "vtt"
+    vtt = build_vtt([final("main-000001", "Hello.", 1000.0)])
+
+    path = write_timestamped_vtt_file("main", vtt, when=datetime(2026, 9, 25, 18, 34, 21), base_dir=base_dir)
+
+    assert path == base_dir / "main_20260925-183421.vtt"
+    assert path.read_text(encoding="utf-8") == vtt
+
+
+def test_write_timestamped_vtt_file_name_has_no_colon_or_other_unsafe_characters(tmp_path):
+    base_dir = tmp_path / "vtt"
+
+    path = write_timestamped_vtt_file(
+        "devroom", build_vtt([]), when=datetime(2026, 9, 25, 18, 42, 30), base_dir=base_dir
+    )
+
+    assert ":" not in path.name
+    assert path.name == "devroom_20260925-184230.vtt"
+
+
+def test_write_timestamped_vtt_file_defaults_to_the_real_clock_when_omitted(tmp_path):
+    base_dir = tmp_path / "vtt"
+    before = datetime.now()
+
+    path = write_timestamped_vtt_file("main", build_vtt([]), base_dir=base_dir)
+
+    after = datetime.now()
+    timestamp_str = path.stem.split("_", 1)[1]
+    parsed = datetime.strptime(timestamp_str, "%Y%m%d-%H%M%S")
+    # Compare at second resolution — the format itself has no finer precision.
+    assert before.replace(microsecond=0) <= parsed <= after.replace(microsecond=0)
+
+
+def test_write_timestamped_vtt_file_two_distinct_timestamps_produce_two_files(tmp_path):
+    base_dir = tmp_path / "vtt"
+
+    first = write_timestamped_vtt_file(
+        "main", build_vtt([final("main-000001", "First.", 1000.0)]),
+        when=datetime(2026, 9, 25, 18, 0, 0), base_dir=base_dir,
+    )
+    second = write_timestamped_vtt_file(
+        "main", build_vtt([final("main-000001", "Second.", 1000.0)]),
+        when=datetime(2026, 9, 25, 18, 5, 0), base_dir=base_dir,
+    )
+
+    assert first != second
+    assert first.exists() and second.exists()
+    assert "First." in first.read_text(encoding="utf-8")
+    assert "Second." in second.read_text(encoding="utf-8")
+
+
+def test_write_timestamped_vtt_file_is_independent_from_the_plain_snapshot(tmp_path):
+    """The on-demand endpoint's write_vtt_file (<stage_id>.vtt) and the
+    per-session write_timestamped_vtt_file (<stage_id>_<timestamp>.vtt) must
+    coexist without clobbering each other."""
+    base_dir = tmp_path / "vtt"
+    vtt = build_vtt([final("main-000001", "Hello.", 1000.0)])
+
+    plain_path = write_vtt_file("main", vtt, base_dir=base_dir)
+    timestamped_path = write_timestamped_vtt_file(
+        "main", vtt, when=datetime(2026, 9, 25, 18, 0, 0), base_dir=base_dir
+    )
+
+    assert plain_path != timestamped_path
+    assert plain_path.exists() and timestamped_path.exists()

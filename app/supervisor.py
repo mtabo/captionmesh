@@ -46,11 +46,18 @@ class StageSupervisor:
         store: Optional[JsonlEventStore] = None,
         translator: Optional[TranslationProvider] = None,
         segmenter: Optional[SegmentationProvider] = None,
+        vtt_output_dir: Optional[Path] = None,
     ) -> None:
         self._conference = conference
         self._api_key = api_key
         self.broadcaster = broadcaster or Broadcaster()
         self.store = store or JsonlEventStore()
+        # None (the default) means no stage writes a per-session VTT archive
+        # — same explicit-opt-in reasoning as StagePipeline's own param this
+        # is forwarded to. Only app.api's lifespan (the real app) passes
+        # VTT_OUTPUT_DIR; tests constructing a StageSupervisor directly stay
+        # filesystem-safe without needing to know about VTT at all.
+        self._vtt_output_dir = vtt_output_dir
         self._translator = translator or GeminiTranslator(
             api_key=api_key, model=TRANSLATOR_MODEL, glossary=conference.gemini.glossary
         )
@@ -88,6 +95,7 @@ class StageSupervisor:
             self._translator,
             segmenter=self._segmenter,
             audio_source=audio_source,
+            vtt_output_dir=self._vtt_output_dir,
         )
 
     def start_all(self) -> None:

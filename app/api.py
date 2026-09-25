@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from app.config import FileSourceConfig, load_conference_config
 from app.supervisor import StageSupervisor
-from app.vtt import build_vtt, write_vtt_file
+from app.vtt import VTT_OUTPUT_DIR, build_vtt, write_vtt_file
 
 # .wav is the canonical demo/fixture audio format (see docs/spec.md); map it
 # explicitly to the modern IANA type rather than trusting the local system's
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     global supervisor
     api_key = os.environ["GEMINI_API_KEY"]
     conference = load_conference_config(CONFIG_PATH)
-    supervisor = StageSupervisor(conference, api_key=api_key)
+    supervisor = StageSupervisor(conference, api_key=api_key, vtt_output_dir=VTT_OUTPUT_DIR)
     supervisor.start_all()
 
     yield

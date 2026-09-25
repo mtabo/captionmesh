@@ -193,8 +193,13 @@ every configured stage in one process.
 | `GET /audience/{stage_id}` | Audience UI for a single stage. |
 | `WS /ws/audience/{stage_id}` | Read-only WebSocket stream of a stage's caption/translation events. |
 | `GET /api/stages/{stage_id}/audio` | Streams the stage's source audio file (only for `file`-type stages). |
-| `GET /api/stages/{stage_id}/captions.vtt` | WebVTT export of the stage's finalized captions. |
+| `GET /api/stages/{stage_id}/captions.vtt` | WebVTT export of the stage's finalized captions (always fresh, also saved as `data/vtt/{stage_id}.vtt`). |
 | `GET /docs` | Auto-generated FastAPI/Swagger API explorer. |
+
+Beyond the on-demand endpoint above, every stage that finishes a session
+cleanly also gets its own archived, timestamped WebVTT file written
+automatically to `data/vtt/{stage_id}_{YYYYMMDD-HHMMSS}.vtt` — no manual
+request needed.
 
 ## Testing
 

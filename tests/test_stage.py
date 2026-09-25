@@ -908,3 +908,150 @@ async def test_a_turn_that_restarts_without_a_final_publishes_its_unfinished_tai
         ("main-000002", "Transcription pipeline and live subtitles."),
     ]
     assert len(translator.calls) == 2
+
+
+class PausingTranscriber:
+    """Yields one final, then blocks until `release()` is called — used to
+    observe StagePipeline state while a session is still `running`."""
+
+    def __init__(self, segment):
+        self._segment = segment
+        self._release = asyncio.Event()
+
+    async def transcribe(self, audio_chunks) -> AsyncIterator[TranscriptSegment]:
+        yield self._segment
+        await self._release.wait()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def _fixed_clock(when):
+    return lambda: when
+
+
+async def test_a_completed_session_writes_a_timestamped_vtt_snapshot(tmp_path):
+    from datetime import datetime
+
+    segments = [TranscriptSegment(
+        text="Hello there.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+    )]
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+    when = datetime(2026, 9, 25, 18, 34, 21)
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, Broadcaster(),
+        vtt_output_dir=vtt_dir, vtt_timestamp_fn=_fixed_clock(when),
+    )
+
+    await pipeline.run()
+
+    assert pipeline.status == "stopped"
+    written = list(vtt_dir.glob("*.vtt"))
+    assert [p.name for p in written] == ["main_20260925-183421.vtt"]
+    assert "Hello there." in written[0].read_text(encoding="utf-8")
+
+
+async def test_two_successive_sessions_produce_two_separate_vtt_files(tmp_path):
+    from datetime import datetime
+
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+
+    segments_1 = [TranscriptSegment(
+        text="First session.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+    )]
+    pipeline_1 = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments_1), store, Broadcaster(),
+        vtt_output_dir=vtt_dir, vtt_timestamp_fn=_fixed_clock(datetime(2026, 9, 25, 18, 0, 0)),
+    )
+    await pipeline_1.run()
+
+    segments_2 = [TranscriptSegment(
+        text="Second session.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+    )]
+    pipeline_2 = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments_2), store, Broadcaster(),
+        vtt_output_dir=vtt_dir, vtt_timestamp_fn=_fixed_clock(datetime(2026, 9, 25, 18, 5, 0)),
+    )
+    await pipeline_2.run()
+
+    written = sorted(p.name for p in vtt_dir.glob("*.vtt"))
+    assert written == ["main_20260925-180000.vtt", "main_20260925-180500.vtt"]
+
+
+async def test_no_vtt_is_written_while_the_session_is_still_running(tmp_path):
+    segment = TranscriptSegment(
+        text="Still going.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+    )
+    transcriber = PausingTranscriber(segment)
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), transcriber, store, Broadcaster(), vtt_output_dir=vtt_dir,
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.sleep(0.01)
+
+    assert pipeline.status == "running"
+    assert not vtt_dir.exists() or list(vtt_dir.glob("*.vtt")) == []
+
+    transcriber.release()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    assert pipeline.status == "stopped"
+    assert len(list(vtt_dir.glob("*.vtt"))) == 1
+
+
+async def test_a_session_that_ends_in_error_does_not_write_a_vtt_snapshot(tmp_path):
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FailingTranscriber(), store, Broadcaster(), vtt_output_dir=vtt_dir,
+    )
+
+    await pipeline.run()  # must not raise
+
+    assert pipeline.status == "error"
+    assert not vtt_dir.exists() or list(vtt_dir.glob("*.vtt")) == []
+
+
+async def test_session_vtt_content_matches_the_stored_events_not_a_second_source(tmp_path):
+    from app.vtt import build_vtt
+
+    segments = [
+        TranscriptSegment(
+            text="Hello there.", is_final=True, language="en", audio_elapsed_ms=1000.0, asr_latency_ms=50.0
+        ),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+    translator = FakeTranslator()
+    pipeline = StagePipeline(
+        make_stage_config(targets=["es"]), FakeTranscriber(segments), store, Broadcaster(), translator,
+        vtt_output_dir=vtt_dir,
+    )
+
+    await pipeline.run()
+
+    written = next(vtt_dir.glob("*.vtt"))
+    expected = build_vtt(store.read_events("main"))
+    assert written.read_text(encoding="utf-8") == expected
+    assert "[es] Hello there." in expected  # translation was actually persisted and used
+
+
+async def test_a_replay_style_stage_without_timing_still_writes_a_valid_empty_vtt(tmp_path):
+    """Mirrors ReplayTranscriber output: finals with no timing at all."""
+    segments = [TranscriptSegment(text="Hola.", is_final=True, language="es")]
+    store = JsonlEventStore(base_dir=tmp_path / "stages")
+    vtt_dir = tmp_path / "vtt"
+    pipeline = StagePipeline(
+        make_stage_config(targets=[]), FakeTranscriber(segments), store, Broadcaster(), vtt_output_dir=vtt_dir,
+    )
+
+    await pipeline.run()  # must not raise
+
+    assert pipeline.status == "stopped"
+    written = next(vtt_dir.glob("*.vtt"))
+    assert written.read_text(encoding="utf-8") == "WEBVTT\n"  # valid, just no cues (no timing)
