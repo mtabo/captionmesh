@@ -1,6 +1,11 @@
 conference:
   name: CaptionMesh Demo
 
+gemini:
+  # Gemini Live Transcribe sessions have a documented ~10 minute limit.
+  # Rotate a full minute before that, not at the exact boundary.
+  session_rotation_seconds: 540
+
 stages:
   - id: main
     name: Main Stage

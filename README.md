@@ -44,6 +44,37 @@ longer than 5s, cancelling it — observed directly in testing. This is the
 same disclosed trade-off as before, just more visible on short demo content
 than on a multi-minute real talk.
 
+## ASR Session Rotation
+
+Gemini Live Transcribe sessions have a documented ~10 minute limit.
+`GeminiTranscriber` (`app/providers/gemini_asr.py`) rotates to a fresh
+session before that limit is reached, and reconnects (bounded backoff:
+1s/2s/4s/8s, then gives up) if a session drops unexpectedly — entirely
+internal to the transcriber. `StagePipeline` never restarts, broadcaster/
+persistence/`seg_id` sequence/translation state are all untouched by a
+rotation.
+
+Configured globally (applies to every `file`-source stage) via a new
+top-level `gemini:` section — no such section existed before this:
+
+```yaml
+gemini:
+  session_rotation_seconds: 540  # default: a minute of margin before the ~10 min limit
+```
+
+An in-flight interim that never resolved to a final before a rotation
+simply disappears (never fabricated into a final); the next session's first
+segment is marked internally so `StagePipeline` starts a fresh `seg_id`
+instead of reusing the old, abandoned one.
+
+**Known limitation, confirmed in testing:** `asr_latency_ms` (see below) is
+measured against the stage's overall stream-start time, not reset per
+session — across a rotation, the receive-side draining wait and reconnect
+handshake both advance wall-clock time while no new audio is being sent,
+inflating this metric for messages received during/after that gap. This is
+a measurement artifact of rotation, not a transcription problem — real
+E2E latency (persisted finals, translations) was unaffected.
+
 ## Running the App (single stage)
 
 The real `StagePipeline` runs inside the FastAPI process defined in `app/api.py`.

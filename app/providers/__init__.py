@@ -12,6 +12,12 @@ class TranscriptSegment(BaseModel):
     # supply it.
     audio_elapsed_ms: Optional[float] = None
     asr_latency_ms: Optional[float] = None
+    # True on the first segment of a new underlying provider session (e.g.
+    # after Gemini ASR session rotation/reconnect). Lets StagePipeline close
+    # any dangling open seg_id from the previous session without fabricating
+    # a final caption for it. False for every other segment and for
+    # providers that have no session concept (e.g. ReplayTranscriber).
+    session_boundary: bool = False
 
 
 class TranscriptionProvider(Protocol):

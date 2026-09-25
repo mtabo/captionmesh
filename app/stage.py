@@ -118,6 +118,12 @@ class StagePipeline:
         logger.debug("[%s] broadcast latency: %.3fms", self._config.id, broadcast_latency_ms)
 
     def _handle_interim(self, segment: TranscriptSegment) -> None:
+        if segment.session_boundary:
+            # A new provider session started (e.g. ASR rotation/reconnect).
+            # Discard any still-open seg_id from the previous session rather
+            # than letting unrelated new content inherit it — the old
+            # interim simply disappears, per spec; never fabricate a final.
+            self._current_seg_id = None
         timing = self._build_timing(segment)
         event = CaptionInterimEvent(
             stage_id=self._config.id,
@@ -132,6 +138,8 @@ class StagePipeline:
         logger.info("[%s][INTERIM] %s", self._config.id, segment.text)
 
     def _handle_final(self, segment: TranscriptSegment) -> None:
+        if segment.session_boundary:
+            self._current_seg_id = None
         timing = self._build_timing(segment)
         seg_id = self._open_seg_id()
         source_language = self._resolve_language(segment)

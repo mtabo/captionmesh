@@ -50,7 +50,11 @@ class StageSupervisor:
     def _build_pipeline(self, stage_config: StageConfig) -> StagePipeline:
         source = stage_config.source
         if isinstance(source, FileSourceConfig):
-            transcriber = GeminiTranscriber(api_key=self._api_key, language=stage_config.language)
+            transcriber = GeminiTranscriber(
+                api_key=self._api_key,
+                language=stage_config.language,
+                session_rotation_seconds=self._conference.gemini.session_rotation_seconds,
+            )
             audio_source = FileAudioSource(Path(source.path))
         elif isinstance(source, ReplaySourceConfig):
             transcriber = ReplayTranscriber(Path(source.path))
