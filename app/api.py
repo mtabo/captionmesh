@@ -4,8 +4,10 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
+from app.broadcast import Broadcaster
 from app.config import load_conference_config
 from app.providers.gemini_asr import GeminiTranscriber
 from app.stage import StagePipeline
@@ -14,8 +16,10 @@ from app.store import JsonlEventStore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 CONFIG_PATH = Path(os.environ.get("CAPTIONMESH_CONFIG", "config/stages.yaml"))
+STATIC_DIR = Path(__file__).parent / "static"
 
 pipelines: dict[str, StagePipeline] = {}
+broadcaster = Broadcaster()
 _tasks: list[asyncio.Task] = []
 
 
@@ -27,7 +31,7 @@ async def lifespan(app: FastAPI):
 
     for stage_config in conference.stages:
         transcriber = GeminiTranscriber(api_key=api_key, language=stage_config.language)
-        pipeline = StagePipeline(stage_config, transcriber, store)
+        pipeline = StagePipeline(stage_config, transcriber, store, broadcaster)
         pipelines[stage_config.id] = pipeline
         _tasks.append(asyncio.create_task(pipeline.run()))
 
@@ -47,3 +51,27 @@ async def health():
         "status": "ok",
         "stages": {stage_id: pipeline.status for stage_id, pipeline in pipelines.items()},
     }
+
+
+@app.get("/audience/{stage_id}")
+async def audience_page(stage_id: str):
+    return FileResponse(STATIC_DIR / "audience.html")
+
+
+@app.websocket("/ws/audience/{stage_id}")
+async def audience_ws(websocket: WebSocket, stage_id: str):
+    await websocket.accept()
+
+    if stage_id not in pipelines:
+        await websocket.close(code=4404, reason="unknown stage")
+        return
+
+    queue = broadcaster.subscribe(stage_id)
+    try:
+        while True:
+            event = await queue.get()
+            await websocket.send_text(event.model_dump_json())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        broadcaster.unsubscribe(stage_id, queue)

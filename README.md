@@ -7,9 +7,10 @@ full architecture and `CLAUDE.md` for development rules.
 ## Running the App (single stage)
 
 The real `StagePipeline` runs inside the FastAPI process defined in `app/api.py`.
-It wires together `FileAudioSource` (ffmpeg) → `GeminiTranscriber` → finalized
-`caption.final` events, persisted as JSONL. Translation and the audience
-UI/broadcast are not implemented yet — see `docs/spec.md` for the full pipeline.
+It wires together `FileAudioSource` (ffmpeg) → `GeminiTranscriber` → `caption.interim`
+/ `caption.final` events, broadcast live to audience clients and, for finals only,
+persisted as JSONL. Translation is not implemented yet — see `docs/spec.md` for
+the full pipeline.
 
 Stages are configured in `config/stages.yaml`:
 
@@ -45,6 +46,25 @@ docker compose up app
 - A stage's transcription failure is caught inside `StagePipeline.run()` and
   reflected as `status: "error"` rather than crashing the process, so other
   stages (once multi-stage support lands) stay unaffected.
+
+### Audience view
+
+Open `http://localhost:8000/audience/main` in a browser (or any `stage_id`
+from `config/stages.yaml`). The page connects to `/ws/audience/{stage_id}`, a
+read-only WebSocket fed by an in-memory `Broadcaster` (`app/broadcast.py`).
+
+- Interim captions update a single "live" line as they arrive.
+- When a final event with the same `seg_id` arrives, it replaces the live
+  line's content and the finalized text is pushed into a short on-page
+  history (last 20 segments).
+- The connection badge reflects WebSocket state; the stage badge polls
+  `GET /health` every 5s.
+- `Broadcaster` only fans out to currently-connected subscribers — it does
+  not buffer events for clients that join late, and per-subscriber queues
+  are bounded (oldest event dropped under backpressure) so a slow client
+  cannot grow an unbounded backlog.
+- `StagePipeline` has no dependency on FastAPI or WebSockets; it only calls
+  `Broadcaster.publish(event)`, so the transport is fully swappable.
 
 Session rotation/reconnect for the ~minutes-long Gemini Live session limit is
 not implemented yet — a long-running stage will simply stop once the session

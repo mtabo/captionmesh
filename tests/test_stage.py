@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.broadcast import Broadcaster
 from app.config import FileSourceConfig, StageConfig
 from app.providers import TranscriptSegment
 from app.stage import StagePipeline
@@ -29,6 +30,16 @@ class FailingTranscriber:
         raise RuntimeError("session dropped")
 
 
+class RecordingBroadcaster(Broadcaster):
+    def __init__(self):
+        super().__init__()
+        self.published = []
+
+    def publish(self, event):
+        self.published.append(event)
+        super().publish(event)
+
+
 def make_stage_config(language: str = "auto") -> StageConfig:
     return StageConfig(
         id="main",
@@ -47,7 +58,7 @@ async def test_final_segments_get_stable_incrementing_seg_ids(tmp_path):
         TranscriptSegment(text="World.", is_final=True, language="en"),
     ]
     store = JsonlEventStore(base_dir=tmp_path)
-    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, Broadcaster())
 
     await pipeline.run()
 
@@ -66,7 +77,7 @@ async def test_interim_segments_are_not_persisted(tmp_path):
         TranscriptSegment(text="final.", is_final=True, language="en"),
     ]
     store = JsonlEventStore(base_dir=tmp_path)
-    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store)
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, Broadcaster())
 
     await pipeline.run()
 
@@ -74,10 +85,64 @@ async def test_interim_segments_are_not_persisted(tmp_path):
     assert len(lines) == 1
 
 
+async def test_interim_and_final_of_same_segment_share_seg_id(tmp_path):
+    segments = [
+        TranscriptSegment(text="Hel", is_final=False),
+        TranscriptSegment(text="Hello", is_final=False),
+        TranscriptSegment(text="Hello.", is_final=True, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    seg_ids = {e.seg_id for e in broadcaster.published}
+    assert seg_ids == {"main-000001"}
+    types = [e.type for e in broadcaster.published]
+    assert types == ["caption.interim", "caption.interim", "caption.final"]
+
+
+async def test_a_new_segment_after_final_gets_a_new_seg_id(tmp_path):
+    segments = [
+        TranscriptSegment(text="Hi", is_final=False),
+        TranscriptSegment(text="Hi.", is_final=True, language="en"),
+        TranscriptSegment(text="Bye", is_final=False),
+        TranscriptSegment(text="Bye.", is_final=True, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    seg_ids = [e.seg_id for e in broadcaster.published]
+    assert seg_ids == ["main-000001", "main-000001", "main-000002", "main-000002"]
+
+
+async def test_interim_events_are_broadcast_but_final_events_are_broadcast_and_persisted(tmp_path):
+    segments = [
+        TranscriptSegment(text="partial", is_final=False),
+        TranscriptSegment(text="final.", is_final=True, language="en"),
+    ]
+    store = JsonlEventStore(base_dir=tmp_path)
+    broadcaster = RecordingBroadcaster()
+    pipeline = StagePipeline(make_stage_config(), FakeTranscriber(segments), store, broadcaster)
+
+    await pipeline.run()
+
+    assert [e.type for e in broadcaster.published] == ["caption.interim", "caption.final"]
+    persisted = (tmp_path / "main.jsonl").read_text().splitlines()
+    assert len(persisted) == 1
+    assert json.loads(persisted[0])["type"] == "caption.final"
+
+
 async def test_language_falls_back_to_configured_language_when_provider_omits_it(tmp_path):
     segments = [TranscriptSegment(text="Hola.", is_final=True, language=None)]
     store = JsonlEventStore(base_dir=tmp_path)
-    pipeline = StagePipeline(make_stage_config(language="es"), FakeTranscriber(segments), store)
+    pipeline = StagePipeline(
+        make_stage_config(language="es"), FakeTranscriber(segments), store, Broadcaster()
+    )
 
     await pipeline.run()
 
@@ -88,7 +153,9 @@ async def test_language_falls_back_to_configured_language_when_provider_omits_it
 async def test_language_falls_back_to_und_when_auto_and_provider_omits_it(tmp_path):
     segments = [TranscriptSegment(text="Hello.", is_final=True, language=None)]
     store = JsonlEventStore(base_dir=tmp_path)
-    pipeline = StagePipeline(make_stage_config(language="auto"), FakeTranscriber(segments), store)
+    pipeline = StagePipeline(
+        make_stage_config(language="auto"), FakeTranscriber(segments), store, Broadcaster()
+    )
 
     await pipeline.run()
 
@@ -98,7 +165,7 @@ async def test_language_falls_back_to_und_when_auto_and_provider_omits_it(tmp_pa
 
 async def test_a_failing_transcriber_is_isolated_as_error_status(tmp_path):
     store = JsonlEventStore(base_dir=tmp_path)
-    pipeline = StagePipeline(make_stage_config(), FailingTranscriber(), store)
+    pipeline = StagePipeline(make_stage_config(), FailingTranscriber(), store, Broadcaster())
 
     await pipeline.run()  # must not raise
 
